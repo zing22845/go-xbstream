@@ -228,6 +228,10 @@ func (ts *TableSchema) decompressStream() (err error) {
 }
 
 func (ts *TableSchema) parseFrmFile() (err error) {
+	defer func() {
+		// drain out the rest of the stream
+		_, _ = io.Copy(io.Discard, ts.ParseOut)
+	}()
 	go func() {
 		// file is qp compressed
 		err = ts.decompressStream()
@@ -247,6 +251,10 @@ func (ts *TableSchema) parseFrmFile() (err error) {
 }
 
 func (ts *TableSchema) parseIbdFile() (err error) {
+	defer func() {
+		// drain out the rest of the stream
+		_, _ = io.Copy(io.Discard, ts.ParseOut)
+	}()
 	go func() {
 		// file is qp compressed
 		err = ts.decompressStream()
@@ -263,7 +271,6 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, ts.ParseOut)
 	for db, table := range tableSpace.TableSchemas {
 		if !strings.EqualFold(ts.SchemaName, db) ||
 			!strings.EqualFold(ts.TableName, table.Name) {
@@ -847,6 +854,60 @@ func (i *IndexStream) IndexStream() {
 			break
 		}
 	}
+}
+
+func (i *IndexStream) ExtractFiles(targetDIR string) (n int64, err error) {
+	files := make(map[string]*os.File)
+
+	xr := xbstream.NewReader(i.Reader)
+	for {
+		chunk, err := xr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return -1, err
+		}
+		fPath := string(chunk.Path)
+		// create target file if not exists
+		f, ok := files[fPath]
+		if !ok {
+			targetFilepath := filepath.Join(targetDIR, fPath)
+			if err = os.MkdirAll(filepath.Dir(targetFilepath), 0777); err != nil {
+				return -1, err
+			}
+			f, err = os.OpenFile(
+				targetFilepath,
+				os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+				0666,
+			)
+			if err != nil {
+				return -1, err
+			}
+			files[fPath] = f
+		}
+
+		if chunk.Type == xbstream.ChunkTypeEOF {
+			f.Close()
+			continue
+		}
+
+		crc32Hash := crc32.NewIEEE()
+		tReader := io.TeeReader(chunk, crc32Hash)
+		_, err = f.Seek(int64(chunk.PayOffset), io.SeekStart)
+		if err != nil {
+			return -1, err
+		}
+		m, err := io.Copy(f, tReader)
+		if err != nil {
+			return -1, err
+		}
+		if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
+			return -1, errors.Errorf("chunk checksum mismatch")
+		}
+		n += m
+	}
+	return n, nil
 }
 
 func (i *IndexStream) ExtractSingleFile(
