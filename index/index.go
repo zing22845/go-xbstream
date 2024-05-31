@@ -306,6 +306,7 @@ type IndexStream struct {
 	WriteSchemaDBDone                 chan struct{}
 	WriteSchemaDBBatchSize            int
 	ParseTargetFileType               string
+	RegSkipPattern                    *regexp.Regexp
 	Err                               error
 }
 
@@ -337,6 +338,7 @@ func NewIndexXbstream(
 	} else if REGMySQL8.MatchString(mysqlVersion) {
 		i.ParseTargetFileType = ".ibd"
 	}
+	i.RegSkipPattern = regexp.MustCompile(`^(mysql|information_schema|performance_schema|sys)$`)
 	i.Offset.Store(0)
 	i.CTX, i.Cancel = context.WithCancel(ctx)
 
@@ -579,10 +581,14 @@ func (i *IndexStream) CopyPayload() {
 
 	switch i.CurrentChunkIndex.DecompressedFileType {
 	case ".frm", ".ibd":
-		fileDepth := len(strings.Split(i.CurrentChunkIndex.Filepath, "/"))
-		if fileDepth != 2 || i.CurrentChunkIndex.DecompressedFileType != i.ParseTargetFileType {
+		fileElements := strings.Split(i.CurrentChunkIndex.Filepath, "/")
+		fileDepth := len(fileElements)
+		if fileDepth != 2 ||
+			i.CurrentChunkIndex.DecompressedFileType != i.ParseTargetFileType ||
+			i.RegSkipPattern.MatchString(fileElements[0]) {
 			// skip parse depth not equal to 2 file
 			// or current decompressed file type not equal to parse target file type (.ibd or .frm)
+			// or file dir match skip pattern
 			writeSize, err = io.CopyN(i.Writer, i.Reader, payLen)
 			if err != nil {
 				i.Err = err
