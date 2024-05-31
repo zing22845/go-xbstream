@@ -1,18 +1,53 @@
-package main
+package index
 
 import (
 	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"sync/atomic"
 
 	"github.com/glebarez/sqlite"
-	"github.com/skmcgrail/go-xbstream/xbstream"
+	"github.com/pkg/errors"
+	"github.com/zing22845/go-frm-parser/frm"
+	frmutils "github.com/zing22845/go-frm-parser/frm/utils"
+	ibd2schema "github.com/zing22845/go-ibd2schema"
+	"github.com/zing22845/go-qpress"
+	"github.com/zing22845/go-xbstream/xbstream"
 	"gorm.io/gorm"
+)
+
+const (
+	// FlagChunkIgnorable indicates a chunk as ignorable
+	FlagChunkIgnorable ChunkFlag = 0x01
+	// ChunkTypePayload indicates chunk contains file payload
+	ChunkTypePayload = ChunkType('P')
+	// ChunkTypeEOF indicates chunk is the eof marker for a file
+	ChunkTypeEOF = ChunkType('E')
+	// ChunkTypeUnknown indicates the chunk was a type that was unknown to xbstream
+	ChunkTypeUnknown   = ChunkType(0)
+	MagicStr           = "XBSTCK01"
+	MagicLen           = len(MagicStr)
+	FlagLen            = 1
+	TypeLen            = 1
+	PathLenBytesLen    = 4
+	ChunkHeaderFixSize = MagicLen + FlagLen + TypeLen + PathLenBytesLen
+	PayLenBytesLen     = 8
+	PayOffsetBytesLen  = 8
+	ChecksumBytesLen   = 4
+	ChunkPayFixSize    = PayLenBytesLen + PayOffsetBytesLen + ChecksumBytesLen
+	OffsetBytesLen     = 8 // the storage size of i.IndexFileOffset(int64) is always 8 bytes
+)
+
+var (
+	REGMySQL8 = regexp.MustCompile(`^8\.`)
+	REGMySQL5 = regexp.MustCompile(`^5\.[5-7]\.`)
 )
 
 // ChunkFlag represents a chunks bit flag set
@@ -24,13 +59,13 @@ type ChunkType uint8 // Type of Chunk
 // ChunkHeader contains the metadata regarding the payload that immediately follows within the archive
 type ChunkHeader struct {
 	Magic          [MagicLen]uint8
-	Flags          [1]uint8
-	Type           [1]uint8 // The type of Chunk, Note xbstream archives end with a specific EOF type
-	PathLenBytes   [4]uint8
+	Flags          [FlagLen]uint8
+	Type           [TypeLen]uint8 // The type of Chunk, Note xbstream archives end with a specific EOF type
+	PathLenBytes   [PathLenBytesLen]uint8
 	PathBytes      []uint8
-	PayLenBytes    [8]uint8
-	PayOffsetBytes [8]uint8
-	ChecksumBytes  [4]uint8
+	PayLenBytes    [PayLenBytesLen]uint8
+	PayOffsetBytes [PayOffsetBytesLen]uint8
+	ChecksumBytes  [ChecksumBytesLen]uint8
 	PathLen        uint32 // The length of PathBytes
 	PayLen         uint64 // The length of PayLenBytes
 	HeaderSize     uint64 // The Size of the chuck's header without payload
@@ -43,22 +78,6 @@ func (c *ChunkHeader) ResetSize() {
 	c.HeaderSize = 0
 	c.ChunkSize = 0
 }
-
-const (
-	// FlagChunkIgnorable indicates a chunk as ignorable
-	FlagChunkIgnorable ChunkFlag = 0x01
-)
-
-const (
-	// ChunkTypePayload indicates chunk contains file payload
-	ChunkTypePayload = ChunkType('P')
-	// ChunkTypeEOF indicates chunk is the eof marker for a file
-	ChunkTypeEOF = ChunkType('E')
-	// ChunkTypeUnknown indicates the chunk was a type that was unknown to xbstream
-	ChunkTypeUnknown = ChunkType(0)
-	MagicStr         = "XBSTCK01"
-	MagicLen         = len(MagicStr)
-)
 
 var (
 	chunkMagic = []uint8(MagicStr)
@@ -77,20 +96,201 @@ func validateChunkType(p ChunkType) ChunkType {
 
 type ChunkIndex struct {
 	gorm.Model
-	Filepath      string `gorm:"column:filepath;type:varchar(4096);index:idx_filepath_start_position"`
-	StartPosition int64  `gorm:"column:start_position;type:bigint;index:idx_filepath_start_position"`
-	EndPosition   int64  `gorm:"column:end_position;type:bigint"`
+	Filepath             string `gorm:"column:filepath;type:varchar(4096);index:idx_filepath_start_position"`
+	StartPosition        int64  `gorm:"column:start_position;type:bigint;index:idx_filepath_start_position"`
+	EndPosition          int64  `gorm:"column:end_position;type:bigint"`
+	DecompressedFileType string `gorm:"-"`
+	DecompressMethod     string `gorm:"-"`
+	PayOffset            uint64 `gorm:"-"`
+}
+
+func (ci *ChunkIndex) DecodeFilepath() {
+	// get ext of ci.Filepath
+	ext := filepath.Ext(ci.Filepath)
+	switch ext {
+	case ".qp":
+		ci.DecompressMethod = "qp"
+		ci.DecompressedFileType = filepath.Ext(ci.Filepath[:len(ci.Filepath)-len(ext)])
+	default:
+		ci.DecompressMethod = ""
+		ci.DecompressedFileType = ext
+	}
+}
+
+type TableSchema struct {
+	gorm.Model
+	Filepath             string         `gorm:"column:filepath;type:varchar(4096);uniqueIndex:uk_filepath"`
+	TableName            string         `gorm:"column:table_name;type:varchar(256);index:idx_table_schema"`
+	SchemaName           string         `gorm:"column:schema_name;type:varchar(256);index:idx_table_schema"`
+	CreateStatement      string         `gorm:"column:create_statement;type:text"`
+	ParseWarn            string         `gorm:"column:parse_warn;type:text"`
+	ParseErr             string         `gorm:"column:parse_err;type:text"`
+	DecompressErr        string         `gorm:"column:decompress_err;type:text"`
+	ParseTargetFileType  string         `gorm:"-"`
+	DecompressedFileType string         `gorm:"-"`
+	DecompressMethod     string         `gorm:"-"`
+	DecompressedFilepath string         `gorm:"-"`
+	StreamIn             *io.PipeWriter `gorm:"-"`
+	StreamOut            *io.PipeReader `gorm:"-"`
+	ParseIn              *io.PipeWriter `gorm:"-"`
+	ParseOut             *io.PipeReader `gorm:"-"`
+	ParseDone            chan struct{}  `gorm:"-"`
+}
+
+func NewTableSchema(
+	filepath,
+	decompressedFileType,
+	decompressMethod,
+	parseTargetFileType string,
+) (ts *TableSchema, err error) {
+	ts = &TableSchema{
+		Filepath:             filepath,
+		DecompressedFileType: decompressedFileType,
+		DecompressMethod:     decompressMethod,
+		ParseTargetFileType:  parseTargetFileType,
+	}
+	err = ts.prepareStream()
+	if err != nil {
+		return nil, err
+	}
+	return ts, nil
+}
+
+func (ts *TableSchema) prepareStream() (err error) {
+	schema, table := filepath.Split(ts.Filepath)
+	schema = strings.TrimRight(schema, "/")
+	ts.SchemaName, err = frmutils.DecodeMySQLFile2Object(schema)
+	if err != nil {
+		return err
+	}
+	ts.TableName, err = frmutils.DecodeMySQLFile2Object(table)
+	if err != nil {
+		return err
+	}
+	ts.StreamOut, ts.StreamIn = io.Pipe()
+	switch ts.DecompressMethod {
+	case "qp":
+		ts.ParseOut, ts.ParseIn = io.Pipe()
+		ts.TableName = strings.TrimRight(ts.TableName, ".qp")
+	case "":
+		ts.ParseIn = ts.StreamIn
+		ts.ParseOut = ts.StreamOut
+	default:
+		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
+	}
+	ts.TableName = strings.TrimRight(ts.TableName, ts.ParseTargetFileType)
+	return nil
+}
+
+func (ts *TableSchema) ParseSchema() {
+	switch ts.DecompressedFileType {
+	case ".frm":
+		err := ts.parseFrmFile()
+		if err != nil {
+			ts.ParseErr = err.Error()
+		}
+	case ".ibd":
+		err := ts.parseIbdFile()
+		if err != nil {
+			ts.ParseErr = err.Error()
+		}
+	default:
+		ts.ParseErr = fmt.Sprintf("unsupported file type %s", ts.DecompressedFileType)
+	}
+}
+
+func (ts *TableSchema) decompressStream() (err error) {
+	switch ts.DecompressMethod {
+	case "qp":
+		defer func() {
+			_ = ts.ParseIn.Close()
+		}()
+		var limitSize int64 = 5 * 1024 * 1024
+		qpressFile := &qpress.ArchiveFile{}
+		isPartial, err := qpressFile.DecompressStream(
+			ts.StreamOut, ts.ParseIn, limitSize)
+		if err != nil {
+			return err
+		}
+		if isPartial {
+			ts.ParseWarn = fmt.Sprintf("partially decompressed to limit size  %d", limitSize)
+			// copy the rest of the stream to discard
+			_, err = io.Copy(io.Discard, ts.StreamOut)
+			if err != nil {
+				return err
+			}
+		}
+	case "":
+	default:
+		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
+	}
+	return nil
+}
+
+func (ts *TableSchema) parseFrmFile() (err error) {
+	go func() {
+		// file is qp compressed
+		err = ts.decompressStream()
+		if err != nil {
+			ts.DecompressErr = err.Error()
+			return
+		}
+	}()
+	result, err := frm.Parse(ts.TableName, ts.ParseOut)
+	if err != nil {
+		return err
+	}
+	ts.CreateStatement = result.String()
+
+	ts.TableName = strings.TrimRight(ts.TableName, ".frm")
+	return nil
+}
+
+func (ts *TableSchema) parseIbdFile() (err error) {
+	go func() {
+		// file is qp compressed
+		err = ts.decompressStream()
+		if err != nil {
+			ts.DecompressErr = err.Error()
+			return
+		}
+	}()
+	tableSpace, err := ibd2schema.NewTableSpace(ts.ParseOut)
+	if err != nil {
+		return err
+	}
+	err = tableSpace.DumpSchemas()
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, ts.ParseOut)
+	for db, table := range tableSpace.TableSchemas {
+		if !strings.EqualFold(ts.SchemaName, db) ||
+			!strings.EqualFold(ts.TableName, table.Name) {
+			continue
+		}
+		ts.SchemaName = db
+		ts.TableName = table.Name
+		ts.CreateStatement = table.DDL
+	}
+	if ts.CreateStatement == "" {
+		return fmt.Errorf("ddl of `%s`.`%s` not found in file %s", ts.SchemaName, ts.TableName, ts.Filepath)
+	}
+	return nil
 }
 
 type IndexStream struct {
 	CTX                               context.Context
 	Cancel                            context.CancelFunc
 	Reader                            io.Reader
-	Writer                            io.Writer
-	Offset                            int64
+	Writer                            io.WriteCloser
+	Offset                            atomic.Int64
 	CurrentChunkIndex                 *ChunkIndex
 	CurrentChunkHeader                *ChunkHeader
 	ChunkIndexChan                    chan *ChunkIndex
+	TableSchemaMap                    map[string]*TableSchema
+	SchemaFileChan                    chan *TableSchema
+	TableSchemaChan                   chan *TableSchema
 	IndexFilePath                     string
 	IndexFilename                     string
 	IndexFileSize                     int64
@@ -102,35 +302,53 @@ type IndexStream struct {
 	IsIndexDone                       bool
 	WriteIndexDBDone                  chan struct{}
 	WriteIndexDBBatchSize             int
+	ParserSchemaFileDone              chan struct{}
+	WriteSchemaDBDone                 chan struct{}
+	WriteSchemaDBBatchSize            int
+	ParseTargetFileType               string
 	Err                               error
 }
 
 func NewIndexXbstream(
 	ctx context.Context,
 	reader io.Reader,
-	writer io.Writer,
+	writer io.WriteCloser,
 	indexFilePath string,
+	mysqlVersion string,
 ) *IndexStream {
 	i := &IndexStream{
-		Reader:                reader,
-		Writer:                writer,
-		IndexFilePath:         indexFilePath,
-		CurrentChunkIndex:     &ChunkIndex{},
-		CurrentChunkHeader:    &ChunkHeader{},
-		ChunkIndexChan:        make(chan *ChunkIndex, 100),
-		WriteIndexDBDone:      make(chan struct{}, 1),
-		WriteIndexDBBatchSize: 100,
+		Reader:                 reader,
+		Writer:                 writer,
+		IndexFilePath:          indexFilePath,
+		CurrentChunkHeader:     &ChunkHeader{},
+		CurrentChunkIndex:      &ChunkIndex{},
+		TableSchemaMap:         make(map[string]*TableSchema),
+		ChunkIndexChan:         make(chan *ChunkIndex, 100),
+		TableSchemaChan:        make(chan *TableSchema, 100),
+		SchemaFileChan:         make(chan *TableSchema, 100),
+		WriteIndexDBDone:       make(chan struct{}, 1),
+		WriteIndexDBBatchSize:  100,
+		ParserSchemaFileDone:   make(chan struct{}, 1),
+		WriteSchemaDBDone:      make(chan struct{}, 1),
+		WriteSchemaDBBatchSize: 100,
 	}
+	if REGMySQL5.MatchString(mysqlVersion) {
+		i.ParseTargetFileType = ".frm"
+	} else if REGMySQL8.MatchString(mysqlVersion) {
+		i.ParseTargetFileType = ".ibd"
+	}
+	i.Offset.Store(0)
 	i.CTX, i.Cancel = context.WithCancel(ctx)
+
 	return i
 }
 
-func (i *IndexStream) WriteIndexDB() {
+func (i *IndexStream) WriteIndexTable() {
 	batchIndex := make([]*ChunkIndex, 0, i.WriteIndexDBBatchSize)
 	defer func() {
 		// Insert any remaining records.
 		if len(batchIndex) > 0 {
-			i.insertBatch(batchIndex)
+			i.insertBatchIndex(batchIndex)
 		}
 		i.WriteIndexDBDone <- struct{}{}
 	}()
@@ -140,7 +358,7 @@ func (i *IndexStream) WriteIndexDB() {
 		}
 		batchIndex = append(batchIndex, chunkIndex)
 		if len(batchIndex) == i.WriteIndexDBBatchSize {
-			i.insertBatch(batchIndex)
+			i.insertBatchIndex(batchIndex)
 			if i.Err != nil {
 				return
 			}
@@ -150,8 +368,54 @@ func (i *IndexStream) WriteIndexDB() {
 	}
 }
 
-func (i *IndexStream) insertBatch(batchIndex []*ChunkIndex) {
+func (i *IndexStream) insertBatchIndex(batchIndex []*ChunkIndex) {
 	result := i.IndexDB.Create(batchIndex)
+	if result.Error != nil {
+		i.Err = result.Error
+	}
+}
+
+func (i *IndexStream) ParseSchemaFile() {
+	defer func() {
+		i.ParserSchemaFileDone <- struct{}{}
+	}()
+	for tableSchema := range i.SchemaFileChan {
+		if tableSchema.Filepath == "" {
+			continue
+		}
+		tableSchema.ParseSchema()
+		i.TableSchemaChan <- tableSchema
+	}
+}
+
+func (i *IndexStream) WriteSchemaTable() {
+	batchSchema := make([]*TableSchema, 0, i.WriteSchemaDBBatchSize)
+	defer func() {
+		// Insert any remaining records.
+		if len(batchSchema) > 0 {
+			i.insertBatchSchema(batchSchema)
+		}
+		i.WriteSchemaDBDone <- struct{}{}
+	}()
+	for tableSchema := range i.TableSchemaChan {
+		if tableSchema.Filepath == "" {
+			continue
+		}
+		batchSchema = append(batchSchema, tableSchema)
+		if len(batchSchema) == i.WriteSchemaDBBatchSize {
+			i.insertBatchSchema(batchSchema)
+			if i.Err != nil {
+				return
+			}
+			// Clear the batch without re-allocating memory.
+			batchSchema = batchSchema[:0]
+		}
+	}
+}
+
+// insertBatchSchema
+func (i *IndexStream) insertBatchSchema(batchTable []*TableSchema) {
+	result := i.IndexDB.Create(batchTable)
 	if result.Error != nil {
 		i.Err = result.Error
 	}
@@ -165,7 +429,7 @@ func (i *IndexStream) WriteHeader(content []byte) {
 	}
 	i.CurrentChunkHeader.HeaderSize += uint64(n)
 	i.CurrentChunkHeader.ChunkSize = i.CurrentChunkHeader.HeaderSize
-	i.Offset += int64(n)
+	i.Offset.Add(int64(n))
 }
 
 func (i *IndexStream) StreamMagic() {
@@ -247,16 +511,19 @@ func (i *IndexStream) StreamPath() {
 	if i.Err != nil {
 		return
 	}
-	if string(i.CurrentChunkHeader.PathBytes) == i.CurrentChunkIndex.Filepath {
-		i.CurrentChunkIndex.EndPosition = i.Offset
+	filepath := string(i.CurrentChunkHeader.PathBytes)
+	if filepath == i.CurrentChunkIndex.Filepath {
+		i.CurrentChunkIndex.EndPosition = i.Offset.Load()
 	} else {
+		// new file
 		i.ChunkIndexChan <- i.CurrentChunkIndex
 		i.CurrentChunkIndex = &ChunkIndex{
-			Filepath:      string(i.CurrentChunkHeader.PathBytes),
+			Filepath:      filepath,
 			StartPosition: i.CurrentChunkIndex.EndPosition,
-			EndPosition:   i.Offset,
+			EndPosition:   i.Offset.Load(),
 		}
 	}
+	i.CurrentChunkIndex.DecodeFilepath()
 }
 
 func (i *IndexStream) StreamPayLen() {
@@ -280,6 +547,8 @@ func (i *IndexStream) StreamPayOffset() {
 		i.Err = fmt.Errorf(`error reading payoffset: %w`, err)
 		return
 	}
+	i.CurrentChunkIndex.PayOffset = binary.LittleEndian.Uint64(
+		i.CurrentChunkHeader.PayOffsetBytes[:])
 	i.WriteHeader(i.CurrentChunkHeader.PayOffsetBytes[:])
 	if i.Err != nil {
 		return
@@ -302,18 +571,71 @@ func (i *IndexStream) CopyPayload() {
 	if i.CurrentChunkHeader.PayLen <= 0 {
 		return
 	}
-	m, err := io.CopyN(i.Writer, i.Reader, int64(i.CurrentChunkHeader.PayLen))
-	if err != nil {
-		i.Err = err
-		return
+	var writeSize int64
+	var err error
+
+	// read payload into tmp buffer
+	payLen := int64(i.CurrentChunkHeader.PayLen)
+
+	switch i.CurrentChunkIndex.DecompressedFileType {
+	case ".frm", ".ibd":
+		fileDepth := len(strings.Split(i.CurrentChunkIndex.Filepath, "/"))
+		if fileDepth != 2 || i.CurrentChunkIndex.DecompressedFileType != i.ParseTargetFileType {
+			// skip parse depth not equal to 2 file
+			// or current decompressed file type not equal to parse target file type (.ibd or .frm)
+			writeSize, err = io.CopyN(i.Writer, i.Reader, payLen)
+			if err != nil {
+				i.Err = err
+				return
+			}
+		} else {
+			var tableSchema *TableSchema
+			if i.CurrentChunkIndex.PayOffset == 0 {
+				// init TableSchema
+				tableSchema, err = NewTableSchema(
+					i.CurrentChunkIndex.Filepath,
+					i.CurrentChunkIndex.DecompressedFileType,
+					i.CurrentChunkIndex.DecompressMethod,
+					i.ParseTargetFileType,
+				)
+				if err != nil {
+					i.Err = err
+					return
+				}
+				i.TableSchemaMap[i.CurrentChunkIndex.Filepath] = tableSchema
+				i.SchemaFileChan <- tableSchema
+			} else {
+				var ok bool
+				tableSchema, ok = i.TableSchemaMap[i.CurrentChunkIndex.Filepath]
+				if !ok {
+					i.Err = fmt.Errorf("table schema not found for %s", i.CurrentChunkIndex.Filepath)
+				}
+			}
+			// combile i.Writer and i.CurrentTableSchema.StreamIn
+			multiWriter := io.MultiWriter(tableSchema.StreamIn, i.Writer)
+			// copy payload writer
+			writeSize, err = io.CopyN(multiWriter, i.Reader, payLen)
+			if err != nil {
+				i.Err = err
+				return
+			}
+		}
+	default:
+		writeSize, err = io.CopyN(i.Writer, i.Reader, payLen)
+		if err != nil {
+			i.Err = err
+			return
+		}
 	}
-	i.CurrentChunkHeader.ChunkSize += uint64(m)
-	i.Offset += m
-	i.CurrentChunkIndex.EndPosition = i.Offset
+
+	i.CurrentChunkHeader.ChunkSize += uint64(writeSize)
+	i.Offset.Add(writeSize)
+	i.CurrentChunkIndex.EndPosition = i.Offset.Load()
 }
 
 func (i *IndexStream) StreamChunk() {
 	i.CurrentChunkHeader.ResetSize()
+
 	// Magic
 	i.StreamMagic()
 	if i.Err != nil || i.IsIndexDone {
@@ -341,6 +663,10 @@ func (i *IndexStream) StreamChunk() {
 	}
 	// type EOF (empty pay)
 	if i.CurrentChunkHeader.Type[0] == byte(ChunkTypeEOF) {
+		if tableSchema, ok := i.TableSchemaMap[i.CurrentChunkIndex.Filepath]; ok {
+			_ = tableSchema.StreamIn.Close()
+			delete(i.TableSchemaMap, i.CurrentChunkIndex.Filepath)
+		}
 		return
 	}
 	// pay length
@@ -366,19 +692,11 @@ func (i *IndexStream) StreamChunk() {
 }
 
 // StreamIndexFile 方法用于将索引文件和索引文件的offset写入到xbstream中
-func (i *IndexStream) StreamIndexFile(indexWriter io.WriteCloser) {
-	// init range vars
+
+func (i *IndexStream) StreamIndexFile() {
 	i.IndexFileOffsetStart = i.CurrentChunkIndex.EndPosition
 	i.IndexFileOffsetEnd = i.IndexFileOffsetStart
-	// init common fix header size
-	chunkHeaderFixSize := len(i.CurrentChunkHeader.Magic) +
-		len(i.CurrentChunkHeader.Flags) +
-		len(i.CurrentChunkHeader.Type) +
-		len(i.CurrentChunkHeader.PathLenBytes)
-	chunkPayFixSize := len(i.CurrentChunkHeader.PayLenBytes) +
-		len(i.CurrentChunkHeader.PayOffsetBytes) +
-		len(i.CurrentChunkHeader.ChecksumBytes)
-	w := xbstream.NewWriter(indexWriter)
+	w := xbstream.NewWriter(i.Writer)
 	b := make([]byte, xbstream.MinimumChunkSize)
 	// get index file size
 	fi, err := os.Stat(i.IndexFilePath)
@@ -398,7 +716,7 @@ func (i *IndexStream) StreamIndexFile(indexWriter io.WriteCloser) {
 		if err != nil {
 			return
 		}
-		// _ = os.Remove(i.IndexFilePath)
+		_ = os.Remove(i.IndexFilePath)
 	}()
 	i.IndexFilename = filepath.Base(i.IndexFilePath)
 	fw, err := w.Create(i.IndexFilename)
@@ -420,25 +738,19 @@ func (i *IndexStream) StreamIndexFile(indexWriter io.WriteCloser) {
 			break
 		}
 		i.IndexFileOffsetEnd += int64(
-			chunkHeaderFixSize + // header common size(magic + flag + type + pathLen)
-				len(
-					[]byte(i.IndexFilename),
-				) + // path
-				chunkPayFixSize + // pay common size(paylen + payoffset + checksum)
+			ChunkHeaderFixSize + // header common fix size(magic + flag + type + pathLen)
+				len([]byte(i.IndexFilename)) + // path name bytes size
+				ChunkPayFixSize + // pay common fix size(paylen + payoffset + checksum)
 				n, // paysize
 		)
 	}
+	// range: left-open and right-closed interval
+	i.IndexFileOffsetEnd += int64(ChunkHeaderFixSize + len([]byte(i.IndexFilename)) - 1) // EOF chunk without pay
 	err = fw.Close()
 	if err != nil {
 		i.Err = fmt.Errorf("close index stream writer error: %w", err)
 		return
 	}
-	i.IndexFileOffsetEnd += int64(
-		chunkHeaderFixSize+len(
-			[]byte(i.IndexFilename),
-		), // EOF chunk without pay
-	) - 1 // range: left-open and right-closed interval
-
 	// write offset of index file as last file's content
 	i.IndexFileOffsetFilename = i.IndexFilename + ".offset"
 	fw, err = w.Create(i.IndexFileOffsetFilename)
@@ -446,8 +758,7 @@ func (i *IndexStream) StreamIndexFile(indexWriter io.WriteCloser) {
 		i.Err = fmt.Errorf("create index chunks offset writer error: %w", err)
 		return
 	}
-	offsetBytesLen := 8 // the storage size of i.IndexFileOffset(int64) is always 8 bytes
-	offsetBytes := make([]byte, offsetBytesLen)
+	offsetBytes := make([]byte, OffsetBytesLen)
 	binary.LittleEndian.PutUint64(offsetBytes, uint64(i.IndexFileOffsetStart))
 	_, err = fw.Write(offsetBytes)
 	if err != nil {
@@ -460,8 +771,8 @@ func (i *IndexStream) StreamIndexFile(indexWriter io.WriteCloser) {
 		return
 	}
 	i.IndexFileOffsetFileChunkTotalSize = int64( // always 2 chunk
-		(chunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 +
-			(chunkPayFixSize + offsetBytesLen), // last chunk without pay
+		(ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (8+1+1+4 + len("package.tar.gz.db.offset")) * 2
+			(ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
 	)
 }
 
@@ -469,6 +780,11 @@ func (i *IndexStream) IndexStream() {
 	defer func() {
 		if i.Err != nil {
 			i.Cancel()
+		} else {
+			i.StreamIndexFile()
+			if i.Err != nil {
+				i.Cancel()
+			}
 		}
 	}()
 	_, err := os.Stat(i.IndexFilePath)
@@ -476,8 +792,7 @@ func (i *IndexStream) IndexStream() {
 		i.Err = fmt.Errorf("index file already exists")
 		return
 	}
-
-	// 连接 sqlite 索引数据库
+	// connect sqlite index db
 	i.IndexDB, err = gorm.Open(sqlite.Open(i.IndexFilePath), &gorm.Config{})
 	if err != nil {
 		i.Err = err
@@ -494,70 +809,151 @@ func (i *IndexStream) IndexStream() {
 			return
 		}
 	}()
-	// 关闭 sqlite 同步，提高性能
+	// close sqlite sync to improve performance
 	i.IndexDB.Exec("PRAGMA synchronous = OFF")
-	i.Err = i.IndexDB.AutoMigrate(&ChunkIndex{})
+	// init index db
+	i.Err = i.IndexDB.AutoMigrate(
+		&ChunkIndex{},
+		&TableSchema{},
+	)
 	if i.Err != nil {
 		return
 	}
-	// 写索引文件
-	go i.WriteIndexDB()
-	// 解析 xbstream 并生成索引
+	// write index of stream to sqlite
+	go i.WriteIndexTable()
+	// parse schema from stream
+	go i.ParseSchemaFile()
+	// write schema of stream to sqlite
+	go i.WriteSchemaTable()
+	// parse xbstream, generate index and parse TableSchema
 	for {
 		i.StreamChunk()
 		if i.Err != nil || i.IsIndexDone {
+			// i.CurrentChunkIndex is pushed when next diff chunk is parsed,
+			// so last chunk is need to be pushed here
 			i.ChunkIndexChan <- i.CurrentChunkIndex
 			close(i.ChunkIndexChan)
+			<-i.WriteIndexDBDone
+			close(i.SchemaFileChan)
+			<-i.ParserSchemaFileDone
+			close(i.TableSchemaChan)
+			<-i.WriteSchemaDBDone
 			break
 		}
 	}
-	<-i.WriteIndexDBDone
 }
 
-func main() {
-
-	var (
-		file          *os.File
-		indexFilePath string
-		err           error
-	)
-
-	indexFilePath = "package.tar.gz.db"
-	if len(os.Args) < 2 {
-		file = os.Stdin
-	} else {
-		filepath := os.Args[1]
-		file, err = os.Open(filepath)
+func (i *IndexStream) ExtractSingleFile(
+	r io.ReadSeeker,
+	path, targetDIR string,
+	offset int64,
+	whence int,
+) (n int64, err error) {
+	var targetFile *os.File
+	targetFilepath := filepath.Join(targetDIR, path)
+	_, err = r.Seek(offset, io.SeekStart)
+	if err != nil {
+		return -1, err
+	}
+	xr := xbstream.NewReader(r)
+	for {
+		chunk, err := xr.Next()
 		if err != nil {
-			fmt.Printf("failed to open file %q: %v\n", filepath, err)
-			return
+			if err == io.EOF {
+				break
+			}
+			return -1, err
 		}
+		streamPath := string(chunk.Path)
+		if streamPath != path {
+			// skip other files
+			_, err = r.Seek(int64(chunk.PayLen), whence)
+			if err != nil {
+				return -1, err
+			}
+		}
+		// create target file if not exists
+		if targetFile == nil {
+			err = os.MkdirAll(filepath.Dir(targetFilepath), 0777)
+			if err != nil {
+				return -1, err
+			}
+			targetFile, err = os.OpenFile(
+				targetFilepath,
+				os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+				0666,
+			)
+			if err != nil {
+				return -1, err
+			}
+		}
+		if chunk.Type == xbstream.ChunkTypeEOF {
+			targetFile.Close()
+			break
+		}
+		crc32Hash := crc32.NewIEEE()
+		tReader := io.TeeReader(chunk, crc32Hash)
+		_, err = targetFile.Seek(int64(chunk.PayOffset), io.SeekStart)
+		if err != nil {
+			return -1, err
+		}
+		m, err := io.Copy(targetFile, tReader)
+		if err != nil {
+			return -1, err
+		}
+		if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
+			return -1, errors.Errorf("chunk checksum mismatch")
+		}
+		n += m
 	}
+	return n, nil
+}
 
-	indexStream := NewIndexXbstream(
-		context.TODO(),
-		file,
-		os.Stdout,
-		indexFilePath,
+func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) (err error) {
+	// get index file offset file name from index file name
+	if i.IndexFilename == "" {
+		return fmt.Errorf("both index file name and offset file name not found")
+	}
+	i.IndexFileOffsetFilename = i.IndexFilename + ".offset"
+
+	// get index file offset file chunk total size
+	i.IndexFileOffsetFileChunkTotalSize = int64( // always 2 chunk
+		(ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (14 + len("package.tar.gz.db.offset")) * 2
+			(ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
 	)
-
-	go func() {
-		defer file.Close()
-		indexStream.IndexStream()
-		if indexStream.Err != nil {
-			_ = os.Remove(indexStream.IndexFilePath)
-			log.Fatalf("index stream error: %+v\n", indexStream.Err)
-			return
-		}
-	}()
-
-	// stream index file
-	indexStream.StreamIndexFile(os.Stdout)
-	if indexStream.Err != nil {
-		indexStream.Cancel()
+	// extract index file offset file
+	n, err := i.ExtractSingleFile(
+		r,
+		i.IndexFileOffsetFilename,
+		targetDIR,
+		i.IndexFileOffsetFileChunkTotalSize,
+		io.SeekEnd)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "index file range: %d-%d, offset file chunk size: %d",
-		indexStream.IndexFileOffsetStart,
-		indexStream.IndexFileOffsetEnd,
-		indexStream.IndexFileOffsetFileChunkTotalSize)
+	if n != OffsetBytesLen {
+		return fmt.Errorf("offset bytes size not equal to OffsetBytesLen: %d", OffsetBytesLen)
+	}
+	// read index file offset from index file offset file
+	offsetBytes, err := os.ReadFile(filepath.Join(targetDIR, i.IndexFileOffsetFilename))
+	if err != nil {
+		return err
+	}
+	i.IndexFileOffsetStart = int64(binary.LittleEndian.Uint64(offsetBytes))
+	if i.IndexFileOffsetStart < 0 {
+		return fmt.Errorf("index file offset start less than 0")
+	}
+	// extract index file
+	i.IndexFilePath = filepath.Join(targetDIR, i.IndexFilename)
+	_, err = i.ExtractSingleFile(
+		r,
+		i.IndexFilename,
+		targetDIR,
+		i.IndexFileOffsetStart,
+		io.SeekStart,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
 }
