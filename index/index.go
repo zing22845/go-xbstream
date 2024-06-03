@@ -94,9 +94,10 @@ func NewIndexStream(
 
 func NewExtractStream(
 	ctx context.Context,
-	mysqlVersion string,
+	indexFilename, mysqlVersion string,
 ) *IndexStream {
 	i := &IndexStream{
+		IndexFilename:        indexFilename,
 		CurrentChunkIndex:    &ChunkIndex{},
 		TableSchemaMap:       make(map[string]*TableSchema),
 		ChunkIndexChan:       make(chan *ChunkIndex, 100),
