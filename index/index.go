@@ -710,24 +710,28 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 		i.Err = fmt.Errorf("table chunk_indices not found, can not extract schemas")
 		return
 	}
+	likePathsInterface := make([]interface{}, len(likePaths))
 	likeConditionParts := make([]string, len(likePaths))
-	notLikeConditionParts := make([]string, len(notLikePaths))
 	// get like paths sql condition
 	for i := range likePaths {
 		likeConditionParts[i] = "filepath LIKE ?"
+		likePathsInterface[i] = likePaths[i]
 	}
 	likeCondition := strings.Join(likeConditionParts, " OR ")
 	// get not like paths sql condition
+	notLikePathsInterface := make([]interface{}, len(notLikePaths))
+	notLikeConditionParts := make([]string, len(notLikePaths))
 	for i := range notLikePaths {
 		notLikeConditionParts[i] = "filepath NOT LIKE ?"
+		notLikePathsInterface[i] = notLikePaths[i]
 	}
 	notLikeCondition := strings.Join(notLikeConditionParts, " AND ")
 
 	// query chunk_indices rows
 	rows, err := i.IndexDB.Model(&ChunkIndex{}).
 		Where("pay_offset = 0"). // only parse first chunk of each file
-		Where(likeCondition, likePaths).
-		Where(notLikeCondition, notLikePaths).
+		Where(likeCondition, likePathsInterface...).
+		Where(notLikeCondition, notLikePathsInterface...).
 		Rows()
 	if err != nil {
 		i.Err = err
@@ -746,6 +750,10 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 		ci.DecodeFilepath()
 		i.ChunkIndexChan <- ci
 	}
+	// close channel
+	close(i.ChunkIndexChan)
+	// send done signal
+	i.IndexTableDone <- struct{}{}
 	if rows.Err() != nil {
 		i.Err = rows.Err()
 	}
@@ -795,56 +803,75 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 
 	// extract schemas from index stream
 	for ci := range i.ChunkIndexChan {
-		// generate table schema
-		ts, err := NewTableSchema(
-			ci.Filepath,
-			ci.DecompressedFileType,
-			ci.DecompressMethod,
-			i.ParseTargetFileType,
-		)
+		i.ExtractSingleSchema(ci, r)
+		if i.Err != nil {
+			return
+		}
+	}
+	<-i.IndexTableDone
+	close(i.SchemaFileChan)
+	<-i.ParserSchemaFileDone
+	close(i.TableSchemaChan)
+	<-i.SchemaTableDone
+}
+
+func (i *IndexStream) ExtractSingleSchema(ci *ChunkIndex, r io.ReadSeeker) {
+	// generate table schema
+	ts, err := NewTableSchema(
+		ci.Filepath,
+		ci.DecompressedFileType,
+		ci.DecompressMethod,
+		i.ParseTargetFileType,
+	)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	// close stream when done
+	defer func() {
+		err = ts.StreamIn.Close()
 		if err != nil {
 			i.Err = err
+		}
+	}()
+	// insert table schema into channel
+	i.SchemaFileChan <- ts
+	// seek to chunk start position
+	_, err = r.Seek(ci.StartPosition, io.SeekStart)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	// read chunk
+	xr := xbstream.NewReader(r)
+	chunk, err := xr.Next()
+	if err != nil {
+		if err == io.EOF {
 			return
 		}
-		// insert table schema into channel
-		i.SchemaFileChan <- ts
-		// seek to chunk start position
-		_, err = r.Seek(ci.StartPosition, io.SeekStart)
-		if err != nil {
-			i.Err = err
-			return
-		}
-		// read chunk
-		xr := xbstream.NewReader(r)
-		chunk, err := xr.Next()
-		if err != nil {
-			if err == io.EOF {
-				continue
-			}
-			i.Err = err
-			return
-		}
-		// check stream path
-		streamPath := string(chunk.Path)
-		if streamPath != ci.Filepath {
-			i.Err = fmt.Errorf("stream path not equal to chunk path at offset %d", ci.StartPosition)
-			return
-		}
-		if chunk.Type == xbstream.ChunkTypeEOF {
-			// empty file
-			continue
-		}
-		crc32Hash := crc32.NewIEEE()
-		tReader := io.TeeReader(chunk, crc32Hash)
-		_, err = io.Copy(ts.StreamIn, tReader)
-		if err != nil {
-			i.Err = err
-			return
-		}
-		if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
-			i.Err = fmt.Errorf("chunk checksum mismatch")
-			return
-		}
+		i.Err = err
+		return
+	}
+	// check stream path
+	streamPath := string(chunk.Path)
+	if streamPath != ci.Filepath {
+		i.Err = fmt.Errorf("stream path not equal to chunk path at offset %d", ci.StartPosition)
+		return
+	}
+	// empty file
+	if chunk.Type == xbstream.ChunkTypeEOF {
+		return
+	}
+	crc32Hash := crc32.NewIEEE()
+	tReader := io.TeeReader(chunk, crc32Hash)
+	_, err = io.Copy(ts.StreamIn, tReader)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
+		i.Err = fmt.Errorf("chunk checksum mismatch")
+		return
 	}
 }
 
@@ -869,7 +896,6 @@ func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 		return
 	}
 	i.IndexFileOffsetFilename = i.IndexFilename + ".offset"
-
 	// get index file offset file chunk total size
 	i.IndexFileOffsetFileChunkTotalSize = int64( // always 2 chunk
 		(ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (14 + len("package.tar.gz.db.offset")) * 2

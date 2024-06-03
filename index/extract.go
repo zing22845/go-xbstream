@@ -19,7 +19,7 @@ func ExtractSingleFile(
 ) (n int64, err error) {
 	var targetFile *os.File
 	targetFilepath := filepath.Join(targetDIR, path)
-	_, err = r.Seek(offset, io.SeekStart)
+	_, err = r.Seek(offset, whence)
 	if err != nil {
 		return -1, err
 	}
@@ -34,8 +34,8 @@ func ExtractSingleFile(
 		}
 		streamPath := string(chunk.Path)
 		if streamPath != path {
-			// skip other files
-			_, err = r.Seek(int64(chunk.PayLen), whence)
+			// skip read other files payload
+			_, err = r.Seek(int64(chunk.PayLen), io.SeekCurrent)
 			if err != nil {
 				return -1, err
 			}
