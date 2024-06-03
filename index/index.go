@@ -24,7 +24,7 @@ const (
 
 var (
 	REGMySQL8 = regexp.MustCompile(`^8\.`)
-	REGMySQL5 = regexp.MustCompile(`^5\.[5-7]\.`)
+	REGMySQL5 = regexp.MustCompile(`^5\.[1,5-7]\.`)
 )
 
 type IndexStream struct {
