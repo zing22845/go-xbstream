@@ -55,6 +55,8 @@ type IndexStream struct {
 	SchemaTableDone                   chan struct{}
 	SchemaTableBatchSize              int
 	ParseTargetFileType               string
+	DefaultLikePaths                  []string
+	DefaultNotLikePaths               []string
 	*MySQLServer
 	RegSkipPattern *regexp.Regexp
 	Err            error
@@ -121,9 +123,13 @@ func (i *IndexStream) prepareParseSchema() {
 	if REGMySQL5.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".frm"
 		i.IsParseTableSchema = true
+		i.DefaultLikePaths = []string{`%/%%.frm`, `%/%%.frm.qp`}
+		i.DefaultNotLikePaths = []string{`mysql/%`, `performance_schema/%`, `sys/%`, `information_schema/%`}
 	} else if REGMySQL8.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".ibd"
 		i.IsParseTableSchema = true
+		i.DefaultLikePaths = []string{`%/%.ibd`, `%.ibd.qp`}
+		i.DefaultNotLikePaths = []string{`mysql/%`, `performance_schema/%`, `sys/%`, `information_schema/%`}
 	}
 	i.RegSkipPattern = regexp.MustCompile(`^(mysql|information_schema|performance_schema|sys)$`)
 }
@@ -710,6 +716,9 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 		i.Err = fmt.Errorf("table chunk_indices not found, can not extract schemas")
 		return
 	}
+	if len(likePaths) == 0 {
+		likePaths = i.DefaultLikePaths
+	}
 	likePathsInterface := make([]interface{}, len(likePaths))
 	likeConditionParts := make([]string, len(likePaths))
 	// get like paths sql condition
@@ -719,6 +728,10 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 	}
 	likeCondition := strings.Join(likeConditionParts, " OR ")
 	// get not like paths sql condition
+	if len(notLikePaths) == 0 {
+		notLikePaths = i.DefaultNotLikePaths
+	}
+	notLikePaths = append(notLikePaths, i.DefaultNotLikePaths...)
 	notLikePathsInterface := make([]interface{}, len(notLikePaths))
 	notLikeConditionParts := make([]string, len(notLikePaths))
 	for i := range notLikePaths {
