@@ -880,7 +880,7 @@ func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 		r,
 		i.IndexFileOffsetFilename,
 		targetDIR,
-		i.IndexFileOffsetFileChunkTotalSize,
+		-i.IndexFileOffsetFileChunkTotalSize,
 		io.SeekEnd)
 	if err != nil {
 		i.Err = err
