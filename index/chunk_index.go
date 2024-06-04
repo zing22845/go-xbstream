@@ -16,6 +16,10 @@ type ChunkIndex struct {
 	DecompressMethod     string `gorm:"-"`
 }
 
+func (ChunkIndex) TableName() string {
+	return "chunk_indecis"
+}
+
 func (ci *ChunkIndex) DecodeFilepath() {
 	// get ext of ci.Filepath
 	ext := filepath.Ext(ci.Filepath)

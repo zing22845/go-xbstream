@@ -3,6 +3,7 @@ package index
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -57,6 +58,7 @@ type IndexStream struct {
 	ParseTargetFileType               string
 	DefaultLikePaths                  []string
 	DefaultNotLikePaths               []string
+	OpenFilesCatch                    map[string]*os.File
 	*MySQLServer
 	RegSkipPattern *regexp.Regexp
 	Err            error
@@ -706,7 +708,7 @@ func (i *IndexStream) getMySQLVersion() {
 	}
 }
 
-func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
+func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirstChunk bool) {
 	// check if chunk_indices exists
 	exists := i.CheckTableExists("chunk_indices")
 	if i.Err != nil {
@@ -741,13 +743,41 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 	notLikeCondition := strings.Join(notLikeConditionParts, " AND ")
 
 	// query chunk_indices rows
-	rows, err := i.IndexDB.Model(&ChunkIndex{}).
-		Where("pay_offset = 0"). // only parse first chunk of each file
-		Where(likeCondition, likePathsInterface...).
-		Where(notLikeCondition, notLikePathsInterface...).
-		Rows()
+	var rows *sql.Rows
+	var err error
+	if onlyFirstChunk {
+		payOffsetExists := i.CheckFieldExists(
+			ChunkIndex{}.TableName(), "pay_offset")
+		if payOffsetExists {
+			rows, err = i.IndexDB.Model(&ChunkIndex{}).
+				Where("pay_offset = 0").
+				Where(likeCondition, likePathsInterface...).
+				Where(notLikeCondition, notLikePathsInterface...).
+				Rows()
+		} else {
+			rows, err = i.IndexDB.Raw(`
+				WITH RankedChunks AS (
+					SELECT *,
+						   ROW_NUMBER() OVER (PARTITION BY filepath ORDER BY start_position) AS row_num
+					FROM chunk_indices
+				)
+				SELECT *
+				FROM RankedChunks
+				WHERE row_num = 1;
+			`).
+				Where(likeCondition, likePathsInterface...).
+				Where(notLikeCondition, notLikePathsInterface...).
+				Rows()
+		}
+	} else {
+		rows, err = i.IndexDB.Model(&ChunkIndex{}).
+			Where(likeCondition, likePathsInterface...).
+			Where(notLikeCondition, notLikePathsInterface...).
+			Rows()
+	}
+
 	if err != nil {
-		i.Err = err
+		i.Err = fmt.Errorf("get chunk_indices rows error: %w", err)
 		return
 	}
 	defer rows.Close()
@@ -769,6 +799,30 @@ func (i *IndexStream) getFirstChunkIndecis(likePaths, notLikePaths []string) {
 	i.IndexTableDone <- struct{}{}
 	if rows.Err() != nil {
 		i.Err = rows.Err()
+	}
+}
+
+func (i *IndexStream) ExtractFiles(r io.ReadSeeker, targetDIR string, likePaths, notLikePaths []string) {
+	// extract index file
+	i.ExtractIndexFile(r, targetDIR)
+	if i.Err != nil {
+		return
+	}
+	// connect sqlite index db
+	i.ConnectIndexDB()
+	if i.Err != nil {
+		return
+	}
+	defer i.CloseIndexDB()
+	// get first chunk_indices
+	go i.getChunkIndecis(likePaths, notLikePaths, false)
+
+	// extract schemas from index stream
+	for ci := range i.ChunkIndexChan {
+		i.ExtractSingleFile(ci, r, targetDIR)
+		if i.Err != nil {
+			return
+		}
 	}
 }
 
@@ -800,7 +854,7 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 	// prepare parse schema
 	i.prepareParseSchema()
 	if !i.IsParseTableSchema {
-		i.Err = fmt.Errorf("mysql version not supported")
+		i.Err = fmt.Errorf("mysql version not supported: %s", i.MySQLVersion)
 		return
 	}
 	// init table schema
@@ -808,7 +862,7 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 		&TableSchema{},
 	)
 	// get first chunk_indices
-	go i.getFirstChunkIndecis(likePaths, notLikePaths)
+	go i.getChunkIndecis(likePaths, notLikePaths, true)
 	// parse schema from stream
 	go i.ParseSchemaFile()
 	// write schema of stream to sqlite
@@ -826,6 +880,79 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 	<-i.ParserSchemaFileDone
 	close(i.TableSchemaChan)
 	<-i.SchemaTableDone
+}
+
+func (i *IndexStream) ExtractSingleFile(ci *ChunkIndex, r io.ReadSeeker, targetDIR string) {
+	// seek to chunk start position
+	_, err := r.Seek(ci.StartPosition, io.SeekStart)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	// read chunk
+	xr := xbstream.NewReader(r)
+	chunk, err := xr.Next()
+	if err != nil {
+		if err == io.EOF {
+			return
+		}
+		i.Err = err
+		return
+	}
+	// check stream path
+	streamPath := string(chunk.Path)
+	if streamPath != ci.Filepath {
+		i.Err = fmt.Errorf("stream path not equal to chunk path at offset %d", ci.StartPosition)
+		return
+	}
+	// create file if not exists
+	f, ok := i.OpenFilesCatch[ci.Filepath]
+	if !ok {
+		targetFilepath := filepath.Join(targetDIR, ci.Filepath)
+		err = os.MkdirAll(
+			filepath.Dir(targetFilepath),
+			0755,
+		)
+		if err != nil {
+			i.Err = err
+			return
+		}
+		f, err = os.OpenFile(
+			targetFilepath,
+			os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+			0666,
+		)
+		if err != nil {
+			i.Err = err
+			return
+		}
+		i.OpenFilesCatch[ci.Filepath] = f
+	}
+
+	// empty file
+	if chunk.Type == xbstream.ChunkTypeEOF {
+		f.Close()
+		delete(i.OpenFilesCatch, ci.Filepath)
+		return
+	}
+	// seek to chunk pay offset
+	_, err = f.Seek(int64(chunk.PayOffset), io.SeekStart)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	// checksum and write chunk pay to file
+	crc32Hash := crc32.NewIEEE()
+	tReader := io.TeeReader(chunk, crc32Hash)
+	_, err = io.Copy(f, tReader)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
+		i.Err = fmt.Errorf("chunk checksum mismatch")
+		return
+	}
 }
 
 func (i *IndexStream) ExtractSingleSchema(ci *ChunkIndex, r io.ReadSeeker) {
@@ -900,6 +1027,32 @@ func (i *IndexStream) CheckTableExists(tableName string) (exists bool) {
 		return true
 	}
 	return false
+}
+
+// checkFieldExists checks if a specific column exists in the specified table
+func (i *IndexStream) CheckFieldExists(tableName, fieldName string) (exists bool) {
+	var count int
+	query := fmt.Sprintf("PRAGMA table_info(%s);", tableName)
+	rows, err := i.IndexDB.Raw(query).Rows()
+	if err != nil {
+		i.Err = err
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, dflt_value, pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt_value, &pk); err != nil {
+			return false
+		}
+		if name == fieldName {
+			count++
+			break
+		}
+	}
+	return count > 0
 }
 
 func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
