@@ -17,7 +17,7 @@ type ChunkIndex struct {
 }
 
 func (ChunkIndex) TableName() string {
-	return "chunk_indecis"
+	return "chunk_indices"
 }
 
 func (ci *ChunkIndex) DecodeFilepath() {
