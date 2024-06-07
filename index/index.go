@@ -2,7 +2,6 @@ package index
 
 import (
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -529,6 +528,12 @@ func (i *IndexStream) getMySQLVersion(db *gorm.DB) {
 }
 
 func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirstChunk bool) {
+	defer func() {
+		// close channel
+		close(i.ChunkIndexChan)
+		// send done signal
+		i.IndexTableDone <- struct{}{}
+	}()
 	// check if chunk_indices exists
 	exists, err := CheckTableExists("chunk_indices", i.IndexDB)
 	if err != nil {
@@ -564,7 +569,8 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	notLikeCondition := strings.Join(notLikeConditionParts, " AND ")
 
 	// query chunk_indices rows
-	var rows *sql.Rows
+	var indices []*ChunkIndex
+	var tx *gorm.DB
 	if onlyFirstChunk {
 		var payOffsetExists bool
 		payOffsetExists, err = CheckFieldExists(
@@ -574,49 +580,29 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 			return
 		}
 		if payOffsetExists {
-			rows, err = i.IndexDB.Model(&ChunkIndex{}).
+			tx = i.IndexDB.
 				Where("pay_offset = 0").
 				Where(likeCondition, likePathsInterface...).
-				Where(notLikeCondition, notLikePathsInterface...).
-				Rows()
+				Where(notLikeCondition, notLikePathsInterface...)
 		} else {
-			rows, err = i.IndexDB.Model(&ChunkIndex{}).
+			tx = i.IndexDB.
 				Where(likeCondition, likePathsInterface...).
 				Where(notLikeCondition, notLikePathsInterface...).
-				Select("filepath, MIN(start_position) AS start_position, MIN(end_position) AS end_position").
-				Group("filepath").
-				Rows()
+				Select("id, filepath, MIN(start_position) AS start_position, MIN(end_position) AS end_position").
+				Group("filepath")
 		}
 	} else {
-		rows, err = i.IndexDB.Model(&ChunkIndex{}).
+		tx = i.IndexDB.
 			Where(likeCondition, likePathsInterface...).
-			Where(notLikeCondition, notLikePathsInterface...).
-			Rows()
+			Where(notLikeCondition, notLikePathsInterface...)
 	}
-
-	if err != nil {
-		i.Err = fmt.Errorf("get chunk_indices rows error: %+v", err)
-		return
+	tx.Find(&indices)
+	if tx.Error != nil {
+		i.Err = fmt.Errorf("get chunk_indices rows error: %w", tx.Error)
 	}
-	defer rows.Close()
-
-	// send chunk index into channel
-	for rows.Next() {
-		ci := &ChunkIndex{}
-		err = i.IndexDB.ScanRows(rows, ci)
-		if err != nil {
-			i.Err = err
-			return
-		}
+	for _, ci := range indices {
 		ci.DecodeFilepath()
 		i.ChunkIndexChan <- ci
-	}
-	// close channel
-	close(i.ChunkIndexChan)
-	// send done signal
-	i.IndexTableDone <- struct{}{}
-	if rows.Err() != nil {
-		i.Err = rows.Err()
 	}
 }
 
@@ -681,20 +667,15 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 	go i.getChunkIndecis(likePaths, notLikePaths, true)
 	// parse schema from stream
 	go i.ParseSchemaFile()
-	// write schema of stream to sqlite
-	db, err := NewConnection("./schema.db")
-	if err != nil {
-		i.Err = err
-		return
-	}
 	// init table schema
-	i.Err = db.AutoMigrate(
+	i.Err = i.IndexDB.AutoMigrate(
 		&TableSchema{},
 	)
 	if i.Err != nil {
 		return
 	}
-	go i.WriteSchemaTable(db)
+	// write table schema
+	go i.WriteSchemaTable(i.IndexDB)
 
 	// extract schemas from index stream
 	for ci := range i.ChunkIndexChan {
@@ -778,8 +759,10 @@ func (i *IndexStream) ExtractSingleFile(ci *ChunkIndex, r io.ReadSeeker, targetD
 }
 
 func (i *IndexStream) ExtractSingleSchema(ci *ChunkIndex, r io.ReadSeeker) {
-	//timer := utils.NewSimpleTimer()
-	//timer.Start()
+	/*
+		timer := utils.NewSimpleTimer()
+		timer.Start()
+	*/
 	// seek to chunk start position
 	_, err := r.Seek(ci.StartPosition, io.SeekStart)
 	if err != nil {
