@@ -22,7 +22,7 @@ package xbstream
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 )
 
@@ -33,9 +33,69 @@ type Reader struct {
 	reader io.Reader
 }
 
+func (r *Reader) Read(p []byte) (n int, err error) {
+	return r.reader.Read(p)
+}
+
 // NewReader creates a new Reader by wrapping the provided reader
 func NewReader(reader io.Reader) *Reader {
 	return &Reader{reader: reader}
+}
+
+func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
+	header.HeaderSize = 0
+	header.PrefixHeader = make([]uint8, ChunkHeaderFixSize)
+
+	// Read Prefix bytes
+	if _, err = r.Read(header.PrefixHeader); err != nil {
+		// We should gracefully bubble up EOF if we attempt to read a new Chunk and hit EOF
+		if err != io.EOF {
+			return ErrReadHeaderFix
+		}
+		return err
+	}
+	header.Magic = header.PrefixHeader[:MagicLen]
+
+	if !bytes.Equal(header.Magic, chunkMagic) {
+		return fmt.Errorf("wrong chunk magic: %s", header.Magic)
+	}
+
+	// Chunk Flags
+	header.Flags = ChunkFlag(header.PrefixHeader[MagicLen])
+
+	// Chunk Type
+	header.Type = ChunkType(header.PrefixHeader[MagicLen+1])
+	if header.Type = validateChunkType(header.Type); header.Type == ChunkTypeUnknown {
+		if !(header.Flags&FlagChunkIgnorable == 1) {
+			return fmt.Errorf("unknown chunk type: '%c'", header.Type)
+		}
+	}
+
+	// Path Length
+	header.PathLen = binary.LittleEndian.Uint32(header.PrefixHeader[MagicLen+2:])
+	header.HeaderSize += uint32(ChunkHeaderFixSize)
+
+	// Path
+	if header.PathLen > 0 {
+		header.Path = make([]uint8, header.PathLen)
+		if _, err = r.Read(header.Path); err != nil {
+			return ErrReadPath
+		}
+	}
+	header.HeaderSize += header.PathLen
+
+	if header.Type == ChunkTypeEOF {
+		return nil
+	}
+	header.PayFix = make([]uint8, ChunkPayFixSize)
+	if _, err = r.Read(header.PayFix); err != nil {
+		return ErrReadPayFix
+	}
+	header.PayLen = binary.LittleEndian.Uint64(header.PayFix)
+	header.PayOffset = binary.LittleEndian.Uint64(header.PayFix[PayLenBytesLen:])
+	header.Checksum = binary.LittleEndian.Uint32(header.PayFix[PayLenBytesLen+PayOffsetBytesLen:])
+	header.HeaderSize += uint32(ChunkPayFixSize)
+	return nil
 }
 
 // Next advances the Reader and returns the next Chunk.
@@ -46,64 +106,13 @@ func (r *Reader) Next() (*Chunk, error) {
 		err   error
 	)
 
-	chunk.Magic = make([]uint8, len(chunkMagic))
-
-	// Chunk Magic
-	if err = binary.Read(r.reader, binary.BigEndian, &chunk.Magic); err != nil {
-		// We should gracefully bubble up EOF if we attempt to read a new Chunk and hit EOF
-		if err != io.EOF {
-			return nil, ErrStreamRead
-		}
-
+	err = r.NextHeader(&chunk.ChunkHeader)
+	if err != nil {
 		return nil, err
-	}
-
-	if bytes.Compare(chunk.Magic, chunkMagic) != 0 {
-		return nil, errors.New("wrong chunk magic")
-	}
-
-	// Chunk Flags
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.Flags); err != nil {
-		return nil, ErrStreamRead
-	}
-
-	// Chunk Type
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.Type); err != nil {
-		return nil, ErrStreamRead
-	}
-	if chunk.Type = validateChunkType(chunk.Type); chunk.Type == ChunkTypeUnknown {
-		if !(chunk.Flags&FlagChunkIgnorable == 1) {
-			return nil, errors.New("unknown chunk type")
-		}
-	}
-
-	// Path Length
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.PathLen); err != nil {
-		return nil, ErrStreamRead
-	}
-
-	// Path
-	if chunk.PathLen > 0 {
-		chunk.Path = make([]uint8, chunk.PathLen)
-		if err = binary.Read(r.reader, binary.BigEndian, &chunk.Path); err != nil {
-			return nil, ErrStreamRead
-		}
 	}
 
 	if chunk.Type == ChunkTypeEOF {
 		return chunk, nil
-	}
-
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.PayLen); err != nil {
-		return nil, ErrStreamRead
-	}
-
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.PayOffset); err != nil {
-		return nil, ErrStreamRead
-	}
-
-	if err = binary.Read(r.reader, binary.LittleEndian, &chunk.Checksum); err != nil {
-		return nil, ErrStreamRead
 	}
 
 	if chunk.PayLen > 0 {

@@ -1,12 +1,10 @@
 package index
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,8 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/glebarez/sqlite"
 	"github.com/zing22845/go-xbstream/xbstream"
+
 	"gorm.io/gorm"
 )
 
@@ -31,11 +29,10 @@ var (
 type IndexStream struct {
 	CTX                               context.Context
 	Cancel                            context.CancelFunc
-	Reader                            io.Reader
-	Writer                            io.WriteCloser
+	XbstreamReader                    *xbstream.Reader
 	Offset                            atomic.Int64
 	CurrentChunkIndex                 *ChunkIndex
-	CurrentChunkHeader                *ChunkHeader
+	CurrentChunkHeader                *xbstream.ChunkHeader
 	ChunkIndexChan                    chan *ChunkIndex
 	TableSchemaMap                    map[string]*TableSchema
 	SchemaFileChan                    chan *TableSchema
@@ -66,16 +63,14 @@ type IndexStream struct {
 
 func NewIndexStream(
 	ctx context.Context,
-	reader io.Reader,
-	writer io.WriteCloser,
-	indexFilePath string,
+	indexFilename string,
+	baseDIR string,
 	mysqlVersion string,
 ) *IndexStream {
 	i := &IndexStream{
-		Reader:               reader,
-		Writer:               writer,
-		IndexFilePath:        indexFilePath,
-		CurrentChunkHeader:   &ChunkHeader{},
+		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
+		IndexFilename:        indexFilename,
+		CurrentChunkHeader:   &xbstream.ChunkHeader{},
 		CurrentChunkIndex:    &ChunkIndex{},
 		TableSchemaMap:       make(map[string]*TableSchema),
 		ChunkIndexChan:       make(chan *ChunkIndex, 100),
@@ -96,31 +91,6 @@ func NewIndexStream(
 	return i
 }
 
-func NewExtractStream(
-	ctx context.Context,
-	indexFilename, mysqlVersion string,
-) *IndexStream {
-	i := &IndexStream{
-		IndexFilename:        indexFilename,
-		CurrentChunkIndex:    &ChunkIndex{},
-		TableSchemaMap:       make(map[string]*TableSchema),
-		ChunkIndexChan:       make(chan *ChunkIndex, 100),
-		TableSchemaChan:      make(chan *TableSchema, 100),
-		SchemaFileChan:       make(chan *TableSchema, 100),
-		IndexTableDone:       make(chan struct{}, 1),
-		IndexTableBatchSize:  100,
-		ParserSchemaFileDone: make(chan struct{}, 1),
-		SchemaTableDone:      make(chan struct{}, 1),
-		SchemaTableBatchSize: 100,
-		MySQLServer: &MySQLServer{
-			MySQLVersion: mysqlVersion,
-		},
-	}
-	i.Offset.Store(0)
-	i.CTX, i.Cancel = context.WithCancel(ctx)
-	return i
-}
-
 func (i *IndexStream) prepareParseSchema() {
 	if REGMySQL5.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".frm"
@@ -130,7 +100,7 @@ func (i *IndexStream) prepareParseSchema() {
 	} else if REGMySQL8.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".ibd"
 		i.IsParseTableSchema = true
-		i.DefaultLikePaths = []string{`%/%.ibd`, `%.ibd.qp`}
+		i.DefaultLikePaths = []string{`%/%%.ibd`, `%/%%.ibd.qp`}
 		i.DefaultNotLikePaths = []string{`mysql/%`, `performance_schema/%`, `sys/%`, `information_schema/%`}
 	}
 	i.RegSkipPattern = regexp.MustCompile(`^(mysql|information_schema|performance_schema|sys)$`)
@@ -140,28 +110,16 @@ func (i *IndexStream) ConnectIndexDB() {
 	if i.IndexDB != nil {
 		return
 	}
-	var err error
-	i.IndexDB, err = gorm.Open(sqlite.Open(i.IndexFilePath), &gorm.Config{})
+	db, err := NewConnection(i.IndexFilePath)
 	if err != nil {
 		i.Err = err
 		return
 	}
-	// close sqlite sync to improve performance
-	i.IndexDB.Exec("PRAGMA synchronous = OFF")
-	if i.IndexDB.Error != nil {
-		i.Err = i.IndexDB.Error
-	}
+	i.IndexDB = db
 }
 
 func (i *IndexStream) CloseIndexDB() {
-	if i.IndexDB == nil {
-		return
-	}
-	sqlDB, err := i.IndexDB.DB()
-	if err != nil {
-		return
-	}
-	_ = sqlDB.Close()
+	CloseConnection(i.IndexDB)
 }
 
 func (i *IndexStream) WriteIndexTable() {
@@ -196,15 +154,15 @@ func (i *IndexStream) insertBatchIndex(batchIndex []*ChunkIndex) {
 	}
 }
 
-func (i *IndexStream) insertMySQLServer() {
-	result := i.IndexDB.Create(i.MySQLServer)
+func (i *IndexStream) insertMySQLServer(db *gorm.DB) {
+	result := db.Create(i.MySQLServer)
 	if result.Error != nil {
 		i.Err = result.Error
 	}
 }
 
-func (i *IndexStream) queryMySQLServer() {
-	result := i.IndexDB.First(i.MySQLServer)
+func (i *IndexStream) queryMySQLServer(db *gorm.DB) {
+	result := db.First(i.MySQLServer)
 	if result.Error != nil {
 		i.Err = result.Error
 	}
@@ -223,12 +181,12 @@ func (i *IndexStream) ParseSchemaFile() {
 	}
 }
 
-func (i *IndexStream) WriteSchemaTable() {
+func (i *IndexStream) WriteSchemaTable(db *gorm.DB) {
 	batchSchema := make([]*TableSchema, 0, i.SchemaTableBatchSize)
 	defer func() {
 		// Insert any remaining records.
 		if len(batchSchema) > 0 {
-			i.insertBatchSchema(batchSchema)
+			i.insertBatchSchema(batchSchema, db)
 		}
 		i.SchemaTableDone <- struct{}{}
 	}()
@@ -238,7 +196,7 @@ func (i *IndexStream) WriteSchemaTable() {
 		}
 		batchSchema = append(batchSchema, tableSchema)
 		if len(batchSchema) == i.SchemaTableBatchSize {
-			i.insertBatchSchema(batchSchema)
+			i.insertBatchSchema(batchSchema, db)
 			if i.Err != nil {
 				return
 			}
@@ -249,26 +207,90 @@ func (i *IndexStream) WriteSchemaTable() {
 }
 
 // insertBatchSchema
-func (i *IndexStream) insertBatchSchema(batchTable []*TableSchema) {
-	result := i.IndexDB.Create(batchTable)
+func (i *IndexStream) insertBatchSchema(batchTable []*TableSchema, db *gorm.DB) {
+	result := db.Create(batchTable)
 	if result.Error != nil {
 		i.Err = result.Error
+		return
 	}
 }
 
-func (i *IndexStream) WriteHeader(content []byte) {
-	n, err := i.Writer.Write(content)
+func (i *IndexStream) PreparePayloadWriter(w io.Writer) (newWriter io.Writer) {
+	defer func() {
+		if i.Err == nil && newWriter == nil {
+			i.Err = fmt.Errorf("writer is nil, nowhere to stream payload")
+		}
+	}()
+	// set default writer
+	if i.CurrentChunkHeader.PayLen <= 0 {
+		return w
+	}
+	var err error
+	switch i.CurrentChunkIndex.DecompressedFileType {
+	case ".frm", ".ibd":
+		fileElements := strings.Split(i.CurrentChunkIndex.Filepath, "/")
+		fileDepth := len(fileElements)
+		if !i.IsParseTableSchema || fileDepth != 2 ||
+			i.CurrentChunkIndex.DecompressedFileType != i.ParseTargetFileType ||
+			i.RegSkipPattern.MatchString(fileElements[0]) {
+			// skip parse depth not equal to 2 file
+			// or current decompressed file type not equal to parse target file type (.ibd or .frm)
+			// or file dir match skip pattern
+			return w
+		} else {
+			var tableSchema *TableSchema
+			if i.CurrentChunkIndex.PayOffset == 0 {
+				// init TableSchema
+				tableSchema, err = NewTableSchema(
+					i.CurrentChunkIndex.Filepath,
+					i.CurrentChunkIndex.DecompressedFileType,
+					i.CurrentChunkIndex.DecompressMethod,
+					i.ParseTargetFileType,
+				)
+				if err != nil {
+					i.Err = err
+					return w
+				}
+				i.TableSchemaMap[i.CurrentChunkIndex.Filepath] = tableSchema
+				i.SchemaFileChan <- tableSchema
+			} else {
+				var ok bool
+				tableSchema, ok = i.TableSchemaMap[i.CurrentChunkIndex.Filepath]
+				if !ok {
+					i.Err = fmt.Errorf("table schema not found for %s", i.CurrentChunkIndex.Filepath)
+					return w
+				}
+			}
+			// only write to tableSchema.StreamIn if i.Writer is nil
+			if w == nil {
+				return tableSchema.StreamIn
+			}
+			// combile i.Writer and i.CurrentTableSchema.StreamIn
+			return io.MultiWriter(tableSchema.StreamIn, w)
+		}
+	}
+	return w
+}
+
+func (i *IndexStream) StreamPayload(payWriter io.Writer) (n int64) {
+	// prepare payload writer
+	payWriter = i.PreparePayloadWriter(payWriter)
+	if i.Err != nil {
+		return
+	}
+	// copy payload
+	payLen := int64(i.CurrentChunkHeader.PayLen)
+	n, err := io.CopyN(payWriter, i.XbstreamReader, payLen)
 	if err != nil {
 		i.Err = err
 		return
 	}
-	i.CurrentChunkHeader.HeaderSize += uint64(n)
-	i.CurrentChunkHeader.ChunkSize = i.CurrentChunkHeader.HeaderSize
-	i.Offset.Add(int64(n))
+	return n
 }
 
-func (i *IndexStream) StreamMagic() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.Magic[:])
+func (i *IndexStream) DecodeChunkHeader() {
+	// read header
+	err := i.XbstreamReader.NextHeader(i.CurrentChunkHeader)
 	if err != nil {
 		if err == io.EOF {
 			// stream done
@@ -278,75 +300,13 @@ func (i *IndexStream) StreamMagic() {
 		i.Err = err
 		return
 	}
-	if !bytes.Equal(i.CurrentChunkHeader.Magic[:], chunkMagic) {
-		i.Err = fmt.Errorf("wrong chunk magic: %s", i.CurrentChunkHeader.Magic)
-		return
-	}
-	i.WriteHeader(i.CurrentChunkHeader.Magic[:])
-	if i.Err != nil {
-		return
-	}
 }
 
-func (i *IndexStream) StreamFlags() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.Flags[:])
-	if err != nil {
-		i.Err = fmt.Errorf("error reading chunk flags: %w", err)
-		return
-	}
-	i.WriteHeader(i.CurrentChunkHeader.Flags[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) StreamType() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.Type[:])
-	if err != nil {
-		i.Err = fmt.Errorf(`error reading chunk type: %w`, err)
-		return
-	}
-	if (validateChunkType(ChunkType(i.CurrentChunkHeader.Type[0])) == ChunkTypeUnknown) &&
-		!(i.CurrentChunkHeader.Flags[0]&byte(FlagChunkIgnorable) == 1) {
-		i.Err = fmt.Errorf("unknown chunk type")
-		return
-	}
-	i.WriteHeader(i.CurrentChunkHeader.Type[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) StreamPathLen() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.PathLenBytes[:])
-	if err != nil {
-		i.Err = fmt.Errorf(`error reading path length: %w`, err)
-		return
-	}
-	i.CurrentChunkHeader.PathLen = binary.LittleEndian.Uint32(
-		i.CurrentChunkHeader.PathLenBytes[:],
-	)
-	i.WriteHeader(i.CurrentChunkHeader.PathLenBytes[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) StreamPath() {
-	if i.CurrentChunkHeader.PathLen <= 0 {
-		return
-	}
-	i.CurrentChunkHeader.PathBytes = make([]byte, i.CurrentChunkHeader.PathLen)
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.PathBytes)
-	if err != nil {
-		i.Err = fmt.Errorf("error reading path: %w", err)
-		return
-	}
-	i.WriteHeader(i.CurrentChunkHeader.PathBytes)
-	if i.Err != nil {
-		return
-	}
-	filepath := string(i.CurrentChunkHeader.PathBytes)
+func (i *IndexStream) IndexHeader() {
+	// set offset
+	i.Offset.Add(int64(i.CurrentChunkHeader.HeaderSize))
+	// set index by file path
+	filepath := string(i.CurrentChunkHeader.Path)
 	if filepath == i.CurrentChunkIndex.Filepath {
 		i.CurrentChunkIndex.EndPosition = i.Offset.Load()
 	} else {
@@ -361,181 +321,40 @@ func (i *IndexStream) StreamPath() {
 	i.CurrentChunkIndex.DecodeFilepath()
 }
 
-func (i *IndexStream) StreamPayLen() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.PayLenBytes[:])
-	if err != nil {
-		i.Err = fmt.Errorf("error reading paylen: %w", err)
-		return
-	}
-	i.CurrentChunkHeader.PayLen = binary.LittleEndian.Uint64(
-		i.CurrentChunkHeader.PayLenBytes[:],
-	)
-	i.WriteHeader(i.CurrentChunkHeader.PayLenBytes[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) StreamPayOffset() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.PayOffsetBytes[:])
-	if err != nil {
-		i.Err = fmt.Errorf(`error reading payoffset: %w`, err)
-		return
-	}
-	i.CurrentChunkIndex.PayOffset = binary.LittleEndian.Uint64(
-		i.CurrentChunkHeader.PayOffsetBytes[:])
-	i.WriteHeader(i.CurrentChunkHeader.PayOffsetBytes[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) StreamChecksum() {
-	_, err := io.ReadFull(i.Reader, i.CurrentChunkHeader.ChecksumBytes[:])
-	if err != nil {
-		i.Err = fmt.Errorf(`error reading checksum: %w`, err)
-		return
-	}
-	i.WriteHeader(i.CurrentChunkHeader.ChecksumBytes[:])
-	if i.Err != nil {
-		return
-	}
-}
-
-func (i *IndexStream) CopyPayload() {
-	if i.CurrentChunkHeader.PayLen <= 0 {
-		return
-	}
-	var writeSize int64
-	var err error
-
-	// read payload into tmp buffer
-	payLen := int64(i.CurrentChunkHeader.PayLen)
-
-	switch i.CurrentChunkIndex.DecompressedFileType {
-	case ".frm", ".ibd":
-		fileElements := strings.Split(i.CurrentChunkIndex.Filepath, "/")
-		fileDepth := len(fileElements)
-		if !i.IsParseTableSchema || fileDepth != 2 ||
-			i.CurrentChunkIndex.DecompressedFileType != i.ParseTargetFileType ||
-			i.RegSkipPattern.MatchString(fileElements[0]) {
-			// skip parse depth not equal to 2 file
-			// or current decompressed file type not equal to parse target file type (.ibd or .frm)
-			// or file dir match skip pattern
-			writeSize, err = io.CopyN(i.Writer, i.Reader, payLen)
-			if err != nil {
-				i.Err = err
-				return
-			}
-		} else {
-			var tableSchema *TableSchema
-			if i.CurrentChunkIndex.PayOffset == 0 {
-				// init TableSchema
-				tableSchema, err = NewTableSchema(
-					i.CurrentChunkIndex.Filepath,
-					i.CurrentChunkIndex.DecompressedFileType,
-					i.CurrentChunkIndex.DecompressMethod,
-					i.ParseTargetFileType,
-				)
-				if err != nil {
-					i.Err = err
-					return
-				}
-				i.TableSchemaMap[i.CurrentChunkIndex.Filepath] = tableSchema
-				i.SchemaFileChan <- tableSchema
-			} else {
-				var ok bool
-				tableSchema, ok = i.TableSchemaMap[i.CurrentChunkIndex.Filepath]
-				if !ok {
-					i.Err = fmt.Errorf("table schema not found for %s", i.CurrentChunkIndex.Filepath)
-				}
-			}
-			// combile i.Writer and i.CurrentTableSchema.StreamIn
-			multiWriter := io.MultiWriter(tableSchema.StreamIn, i.Writer)
-			// copy payload writer
-			writeSize, err = io.CopyN(multiWriter, i.Reader, payLen)
-			if err != nil {
-				i.Err = err
-				return
-			}
-		}
-	default:
-		writeSize, err = io.CopyN(i.Writer, i.Reader, payLen)
-		if err != nil {
-			i.Err = err
-			return
-		}
-	}
-
-	i.CurrentChunkHeader.ChunkSize += uint64(writeSize)
-	i.Offset.Add(writeSize)
-	i.CurrentChunkIndex.EndPosition = i.Offset.Load()
-}
-
-func (i *IndexStream) StreamChunk() {
-	i.CurrentChunkHeader.ResetSize()
-
-	// Magic
-	i.StreamMagic()
+func (i *IndexStream) StreamChunk(payWriter io.Writer) {
+	// decode chunk header
+	i.DecodeChunkHeader()
 	if i.Err != nil || i.IsIndexDone {
 		return
 	}
-	// Flags
-	i.StreamFlags()
-	if i.Err != nil {
-		return
-	}
-	// Type
-	i.StreamType()
-	if i.Err != nil {
-		return
-	}
-	// Path Length
-	i.StreamPathLen()
-	if i.Err != nil {
-		return
-	}
-	// Path
-	i.StreamPath()
-	if i.Err != nil {
-		return
-	}
-	// type EOF (empty pay)
-	if i.CurrentChunkHeader.Type[0] == byte(ChunkTypeEOF) {
+
+	// generate index by current chunk header
+	i.IndexHeader()
+
+	// type EOF (end of inner file)
+	if i.CurrentChunkHeader.Type == xbstream.ChunkTypeEOF {
 		if tableSchema, ok := i.TableSchemaMap[i.CurrentChunkIndex.Filepath]; ok {
 			_ = tableSchema.StreamIn.Close()
 			delete(i.TableSchemaMap, i.CurrentChunkIndex.Filepath)
 		}
 		return
 	}
-	// pay length
-	i.StreamPayLen()
-	if i.Err != nil {
-		return
-	}
-	// pay offset
-	i.StreamPayOffset()
-	if i.Err != nil {
-		return
-	}
-	// checksum
-	i.StreamChecksum()
-	if i.Err != nil {
-		return
-	}
+
 	// pay load
-	i.CopyPayload()
+	n := i.StreamPayload(payWriter)
 	if i.Err != nil {
 		return
 	}
+	i.Offset.Add(n)
+	i.CurrentChunkIndex.EndPosition = i.Offset.Load()
 }
 
 // StreamIndexFile 方法用于将索引文件和索引文件的offset写入到xbstream中
 
-func (i *IndexStream) StreamIndexFile() {
+func (i *IndexStream) StreamIndexFile(w io.WriteCloser) {
 	i.IndexFileOffsetStart = i.CurrentChunkIndex.EndPosition
 	i.IndexFileOffsetEnd = i.IndexFileOffsetStart
-	w := xbstream.NewWriter(i.Writer)
+	xw := xbstream.NewWriter(w)
 	b := make([]byte, xbstream.MinimumChunkSize)
 	// get index file size
 	fi, err := os.Stat(i.IndexFilePath)
@@ -557,8 +376,7 @@ func (i *IndexStream) StreamIndexFile() {
 		}
 		_ = os.Remove(i.IndexFilePath)
 	}()
-	i.IndexFilename = filepath.Base(i.IndexFilePath)
-	fw, err := w.Create(i.IndexFilename)
+	fw, err := xw.Create(i.IndexFilename)
 	if err != nil {
 		i.Err = fmt.Errorf("create index chunks writer error: %w", err)
 		return
@@ -577,14 +395,14 @@ func (i *IndexStream) StreamIndexFile() {
 			break
 		}
 		i.IndexFileOffsetEnd += int64(
-			ChunkHeaderFixSize + // header common fix size(magic + flag + type + pathLen)
+			xbstream.ChunkHeaderFixSize + // header common fix size(magic + flag + type + pathLen)
 				len([]byte(i.IndexFilename)) + // path name bytes size
-				ChunkPayFixSize + // pay common fix size(paylen + payoffset + checksum)
+				xbstream.ChunkPayFixSize + // pay common fix size(paylen + payoffset + checksum)
 				n, // paysize
 		)
 	}
 	// range: left-open and right-closed interval
-	i.IndexFileOffsetEnd += int64(ChunkHeaderFixSize + len([]byte(i.IndexFilename)) - 1) // EOF chunk without pay
+	i.IndexFileOffsetEnd += int64(xbstream.ChunkHeaderFixSize + len([]byte(i.IndexFilename)) - 1) // EOF chunk without pay
 	err = fw.Close()
 	if err != nil {
 		i.Err = fmt.Errorf("close index stream writer error: %w", err)
@@ -592,7 +410,7 @@ func (i *IndexStream) StreamIndexFile() {
 	}
 	// write offset of index file as last file's content
 	i.IndexFileOffsetFilename = i.IndexFilename + ".offset"
-	fw, err = w.Create(i.IndexFileOffsetFilename)
+	fw, err = xw.Create(i.IndexFileOffsetFilename)
 	if err != nil {
 		i.Err = fmt.Errorf("create index chunks offset writer error: %w", err)
 		return
@@ -610,17 +428,17 @@ func (i *IndexStream) StreamIndexFile() {
 		return
 	}
 	i.IndexFileOffsetFileChunkTotalSize = int64( // always 2 chunk
-		(ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (8+1+1+4 + len("package.tar.gz.db.offset")) * 2
-			(ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
+		(xbstream.ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (8+1+1+4 + len("package.tar.gz.db.offset")) * 2
+			(xbstream.ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
 	)
 }
 
-func (i *IndexStream) IndexStream() {
+func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 	defer func() {
 		if i.Err != nil {
 			i.Cancel()
 		} else {
-			i.StreamIndexFile()
+			i.StreamIndexFile(w)
 			if i.Err != nil {
 				i.Cancel()
 			}
@@ -656,7 +474,7 @@ func (i *IndexStream) IndexStream() {
 		}
 	}
 	// write mysql server info
-	i.insertMySQLServer()
+	i.insertMySQLServer(i.IndexDB)
 	if i.Err != nil {
 		return
 	}
@@ -666,10 +484,11 @@ func (i *IndexStream) IndexStream() {
 	// parse schema from stream
 	go i.ParseSchemaFile()
 	// write schema of stream to sqlite
-	go i.WriteSchemaTable()
+	go i.WriteSchemaTable(i.IndexDB)
 	// parse xbstream, generate index and parse TableSchema
+	i.XbstreamReader = xbstream.NewReader(r)
 	for {
-		i.StreamChunk()
+		i.StreamChunk(w)
 		if i.Err != nil || i.IsIndexDone {
 			// i.CurrentChunkIndex is pushed when next diff chunk is parsed,
 			// so last chunk is need to be pushed here
@@ -685,15 +504,16 @@ func (i *IndexStream) IndexStream() {
 	}
 }
 
-func (i *IndexStream) getMySQLVersion() {
+func (i *IndexStream) getMySQLVersion(db *gorm.DB) {
 	// check if mysql_server exists
-	exists := i.CheckTableExists("mysql_server")
-	if i.Err != nil {
+	exists, err := CheckTableExists("mysql_server", db)
+	if err != nil {
+		i.Err = err
 		return
 	}
 	if exists {
 		// read mysql version info
-		i.queryMySQLServer()
+		i.queryMySQLServer(db)
 		if i.Err != nil {
 			return
 		}
@@ -710,8 +530,9 @@ func (i *IndexStream) getMySQLVersion() {
 
 func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirstChunk bool) {
 	// check if chunk_indices exists
-	exists := i.CheckTableExists("chunk_indices")
-	if i.Err != nil {
+	exists, err := CheckTableExists("chunk_indices", i.IndexDB)
+	if err != nil {
+		i.Err = err
 		return
 	}
 	if !exists {
@@ -744,10 +565,14 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 
 	// query chunk_indices rows
 	var rows *sql.Rows
-	var err error
 	if onlyFirstChunk {
-		payOffsetExists := i.CheckFieldExists(
-			ChunkIndex{}.TableName(), "pay_offset")
+		var payOffsetExists bool
+		payOffsetExists, err = CheckFieldExists(
+			ChunkIndex{}.TableName(), "pay_offset", i.IndexDB)
+		if err != nil {
+			i.Err = err
+			return
+		}
 		if payOffsetExists {
 			rows, err = i.IndexDB.Model(&ChunkIndex{}).
 				Where("pay_offset = 0").
@@ -755,18 +580,11 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 				Where(notLikeCondition, notLikePathsInterface...).
 				Rows()
 		} else {
-			rows, err = i.IndexDB.Raw(`
-				WITH RankedChunks AS (
-					SELECT *,
-						   ROW_NUMBER() OVER (PARTITION BY filepath ORDER BY start_position) AS row_num
-					FROM chunk_indices
-				)
-				SELECT *
-				FROM RankedChunks
-				WHERE row_num = 1;
-			`).
+			rows, err = i.IndexDB.Model(&ChunkIndex{}).
 				Where(likeCondition, likePathsInterface...).
 				Where(notLikeCondition, notLikePathsInterface...).
+				Select("filepath, MIN(start_position) AS start_position, MIN(end_position) AS end_position").
+				Group("filepath").
 				Rows()
 		}
 	} else {
@@ -777,7 +595,7 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	}
 
 	if err != nil {
-		i.Err = fmt.Errorf("get chunk_indices rows error: %w", err)
+		i.Err = fmt.Errorf("get chunk_indices rows error: %+v", err)
 		return
 	}
 	defer rows.Close()
@@ -839,15 +657,16 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 	}
 	defer i.CloseIndexDB()
 	// check if table_schemas exists
-	exists := i.CheckTableExists("table_schemas")
-	if i.Err != nil {
+	exists, err := CheckTableExists("table_schemas", i.IndexDB)
+	if err != nil {
+		i.Err = err
 		return
 	}
 	if exists {
 		// table schema exists, skip extract schemas
 		return
 	}
-	i.getMySQLVersion()
+	i.getMySQLVersion(i.IndexDB)
 	if i.Err != nil {
 		return
 	}
@@ -857,16 +676,25 @@ func (i *IndexStream) ExtractSchemas(r io.ReadSeeker, targetDIR string, likePath
 		i.Err = fmt.Errorf("mysql version not supported: %s", i.MySQLVersion)
 		return
 	}
-	// init table schema
-	i.Err = i.IndexDB.AutoMigrate(
-		&TableSchema{},
-	)
+
 	// get first chunk_indices
 	go i.getChunkIndecis(likePaths, notLikePaths, true)
 	// parse schema from stream
 	go i.ParseSchemaFile()
 	// write schema of stream to sqlite
-	go i.WriteSchemaTable()
+	db, err := NewConnection("./schema.db")
+	if err != nil {
+		i.Err = err
+		return
+	}
+	// init table schema
+	i.Err = db.AutoMigrate(
+		&TableSchema{},
+	)
+	if i.Err != nil {
+		return
+	}
+	go i.WriteSchemaTable(db)
 
 	// extract schemas from index stream
 	for ci := range i.ChunkIndexChan {
@@ -942,118 +770,41 @@ func (i *IndexStream) ExtractSingleFile(ci *ChunkIndex, r io.ReadSeeker, targetD
 		return
 	}
 	// checksum and write chunk pay to file
-	crc32Hash := crc32.NewIEEE()
-	tReader := io.TeeReader(chunk, crc32Hash)
-	_, err = io.Copy(f, tReader)
+	_, err = io.Copy(f, chunk)
 	if err != nil {
 		i.Err = err
-		return
-	}
-	if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
-		i.Err = fmt.Errorf("chunk checksum mismatch")
 		return
 	}
 }
 
 func (i *IndexStream) ExtractSingleSchema(ci *ChunkIndex, r io.ReadSeeker) {
-	// generate table schema
-	ts, err := NewTableSchema(
-		ci.Filepath,
-		ci.DecompressedFileType,
-		ci.DecompressMethod,
-		i.ParseTargetFileType,
-	)
-	if err != nil {
-		i.Err = err
-		return
-	}
-	// close stream when done
-	defer func() {
-		err = ts.StreamIn.Close()
-		if err != nil {
-			i.Err = err
-		}
-	}()
-	// insert table schema into channel
-	i.SchemaFileChan <- ts
+	//timer := utils.NewSimpleTimer()
+	//timer.Start()
 	// seek to chunk start position
-	_, err = r.Seek(ci.StartPosition, io.SeekStart)
+	_, err := r.Seek(ci.StartPosition, io.SeekStart)
 	if err != nil {
 		i.Err = err
 		return
 	}
-	// read chunk
-	xr := xbstream.NewReader(r)
-	chunk, err := xr.Next()
-	if err != nil {
-		if err == io.EOF {
-			return
-		}
-		i.Err = err
+	i.CurrentChunkIndex = ci
+	i.XbstreamReader = xbstream.NewReader(r)
+	// decode chunk header
+	i.DecodeChunkHeader()
+	if i.Err != nil || i.IsIndexDone {
 		return
 	}
-	// check stream path
-	streamPath := string(chunk.Path)
-	if streamPath != ci.Filepath {
-		i.Err = fmt.Errorf("stream path not equal to chunk path at offset %d", ci.StartPosition)
+	_ = i.StreamPayload(nil)
+	if i.Err != nil {
 		return
 	}
-	// empty file
-	if chunk.Type == xbstream.ChunkTypeEOF {
-		return
+	// always extract table schema from only first chunk
+	if tableSchema, ok := i.TableSchemaMap[i.CurrentChunkIndex.Filepath]; ok {
+		_ = tableSchema.StreamIn.Close()
+		delete(i.TableSchemaMap, i.CurrentChunkIndex.Filepath)
 	}
-	crc32Hash := crc32.NewIEEE()
-	tReader := io.TeeReader(chunk, crc32Hash)
-	_, err = io.Copy(ts.StreamIn, tReader)
-	if err != nil {
-		i.Err = err
-		return
-	}
-	if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
-		i.Err = fmt.Errorf("chunk checksum mismatch")
-		return
-	}
-}
-
-func (i *IndexStream) CheckTableExists(tableName string) (exists bool) {
-	query := `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`
-	var result int64
-	err := i.IndexDB.Raw(query, tableName).Scan(&result).Error
-	if err != nil {
-		i.Err = err
-		return false
-	}
-	if result > 0 {
-		return true
-	}
-	return false
 }
 
 // checkFieldExists checks if a specific column exists in the specified table
-func (i *IndexStream) CheckFieldExists(tableName, fieldName string) (exists bool) {
-	var count int
-	query := fmt.Sprintf("PRAGMA table_info(%s);", tableName)
-	rows, err := i.IndexDB.Raw(query).Rows()
-	if err != nil {
-		i.Err = err
-		return false
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, dflt_value, pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt_value, &pk); err != nil {
-			return false
-		}
-		if name == fieldName {
-			count++
-			break
-		}
-	}
-	return count > 0
-}
 
 func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 	// get index file offset file name from index file name
@@ -1064,8 +815,8 @@ func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 	i.IndexFileOffsetFilename = i.IndexFilename + ".offset"
 	// get index file offset file chunk total size
 	i.IndexFileOffsetFileChunkTotalSize = int64( // always 2 chunk
-		(ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (14 + len("package.tar.gz.db.offset")) * 2
-			(ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
+		(xbstream.ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (14 + len("package.tar.gz.db.offset")) * 2
+			(xbstream.ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
 	)
 	// extract index file offset file
 	n, err := ExtractSingleFile(

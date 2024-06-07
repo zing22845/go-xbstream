@@ -22,6 +22,7 @@ package xbstream
 import (
 	"errors"
 	"io"
+	"unsafe"
 )
 
 // ChunkFlag represents a chunks bit flag set
@@ -37,6 +38,16 @@ const (
 	MaxPathLength = 512
 	// FlagChunkIgnorable indicates a chunk as ignorable
 	FlagChunkIgnorable ChunkFlag = 0x01
+	MagicStr                     = "XBSTCK01"
+	MagicLen                     = len(MagicStr)
+	FlagLen                      = unsafe.Sizeof(ChunkFlag(0))
+	TypeLen                      = unsafe.Sizeof(ChunkType(0))
+	PathLenBytesLen              = unsafe.Sizeof(ChunkHeader{}.PathLen)
+	ChunkHeaderFixSize           = MagicLen + int(FlagLen+TypeLen+PathLenBytesLen)
+	PayLenBytesLen               = unsafe.Sizeof(ChunkHeader{}.PayLen)
+	PayOffsetBytesLen            = unsafe.Sizeof(ChunkHeader{}.PayOffset)
+	ChecksumBytesLen             = unsafe.Sizeof(ChunkHeader{}.Checksum)
+	ChunkPayFixSize              = int(PayLenBytesLen + PayOffsetBytesLen + ChecksumBytesLen)
 )
 
 const (
@@ -49,9 +60,11 @@ const (
 )
 
 var (
-	chunkMagic = []uint8("XBSTCK01")
-	// ErrStreamRead indicates an error occurred while parsing an xbstream
-	ErrStreamRead = errors.New("xbstream read error")
+	chunkMagic       = []uint8(MagicStr)
+	ErrReadHeaderFix = errors.New("xbstream read header fix error")
+	ErrStreamRead    = errors.New("xbstream read error")
+	ErrReadPath      = errors.New("xbstream read path error")
+	ErrReadPayFix    = errors.New("xbstream read pay fix error")
 )
 
 // Chunk encapsulates a ChunkHeader and provides a io.Reader interface for reading the payload described by the Header
@@ -62,12 +75,15 @@ type Chunk struct {
 
 // ChunkHeader contains the metadata regarding the payload that immediately follows within the archive
 type ChunkHeader struct {
-	Magic     []uint8
-	Flags     ChunkFlag
-	Type      ChunkType // The type of Chunk, Note xbstream archives end with a specific EOF type
-	PathLen   uint32
-	Path      []uint8
-	PayLen    uint64
-	PayOffset uint64
-	Checksum  uint32
+	PrefixHeader []uint8
+	Magic        []uint8
+	Flags        ChunkFlag
+	Type         ChunkType // The type of Chunk, Note xbstream archives end with a specific EOF type
+	PathLen      uint32
+	Path         []uint8
+	PayFix       []uint8
+	PayLen       uint64
+	PayOffset    uint64
+	Checksum     uint32
+	HeaderSize   uint32
 }
