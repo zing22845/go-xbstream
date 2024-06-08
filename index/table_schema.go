@@ -79,6 +79,11 @@ func (ts *TableSchema) prepareStream() (err error) {
 }
 
 func (ts *TableSchema) ParseSchema() {
+	defer func() {
+		if r := recover(); r != nil {
+			ts.ParseErr = fmt.Sprintf("panic occurred: %v", r)
+		}
+	}()
 	switch ts.DecompressedFileType {
 	case ".frm":
 		err := ts.parseFrmFile()
