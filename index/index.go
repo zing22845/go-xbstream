@@ -214,17 +214,19 @@ func (i *IndexStream) insertBatchSchema(batchTable []*TableSchema, db *gorm.DB) 
 	}
 }
 
-func (i *IndexStream) PreparePayloadWriter(w io.Writer) (newWriter io.Writer) {
+func (i *IndexStream) DecodeChunkPayload() (n int64) {
+	var err error
+	w := io.Discard
+	payLen := int64(i.CurrentChunkHeader.PayLen)
 	defer func() {
-		if i.Err == nil && newWriter == nil {
-			i.Err = fmt.Errorf("writer is nil, nowhere to stream payload")
+		if i.Err != nil {
+			return
+		}
+		n, err = io.CopyN(w, i.XbstreamReader, payLen)
+		if err != nil {
+			i.Err = err
 		}
 	}()
-	// set default writer
-	if i.CurrentChunkHeader.PayLen <= 0 {
-		return w
-	}
-	var err error
 	switch i.CurrentChunkIndex.DecompressedFileType {
 	case ".frm", ".ibd":
 		fileElements := strings.Split(i.CurrentChunkIndex.Filepath, "/")
@@ -235,7 +237,7 @@ func (i *IndexStream) PreparePayloadWriter(w io.Writer) (newWriter io.Writer) {
 			// skip parse depth not equal to 2 file
 			// or current decompressed file type not equal to parse target file type (.ibd or .frm)
 			// or file dir match skip pattern
-			return w
+			return
 		} else {
 			var tableSchema *TableSchema
 			if i.CurrentChunkIndex.PayOffset == 0 {
@@ -248,7 +250,7 @@ func (i *IndexStream) PreparePayloadWriter(w io.Writer) (newWriter io.Writer) {
 				)
 				if err != nil {
 					i.Err = err
-					return w
+					return
 				}
 				i.TableSchemaMap[i.CurrentChunkIndex.Filepath] = tableSchema
 				i.SchemaFileChan <- tableSchema
@@ -257,34 +259,15 @@ func (i *IndexStream) PreparePayloadWriter(w io.Writer) (newWriter io.Writer) {
 				tableSchema, ok = i.TableSchemaMap[i.CurrentChunkIndex.Filepath]
 				if !ok {
 					i.Err = fmt.Errorf("table schema not found for %s", i.CurrentChunkIndex.Filepath)
-					return w
+					return
 				}
 			}
 			// only write to tableSchema.StreamIn if i.Writer is nil
-			if w == nil {
-				return tableSchema.StreamIn
-			}
-			// combile i.Writer and i.CurrentTableSchema.StreamIn
-			return io.MultiWriter(tableSchema.StreamIn, w)
+			w = tableSchema.StreamIn
+			return
 		}
 	}
-	return w
-}
-
-func (i *IndexStream) StreamPayload(payWriter io.Writer) (n int64) {
-	// prepare payload writer
-	payWriter = i.PreparePayloadWriter(payWriter)
-	if i.Err != nil {
-		return
-	}
-	// copy payload
-	payLen := int64(i.CurrentChunkHeader.PayLen)
-	n, err := io.CopyN(payWriter, i.XbstreamReader, payLen)
-	if err != nil {
-		i.Err = err
-		return
-	}
-	return n
+	return
 }
 
 func (i *IndexStream) DecodeChunkHeader() {
@@ -320,7 +303,7 @@ func (i *IndexStream) IndexHeader() {
 	i.CurrentChunkIndex.DecodeFilepath()
 }
 
-func (i *IndexStream) StreamChunk(payWriter io.Writer) {
+func (i *IndexStream) DecodeChunk() {
 	// decode chunk header
 	i.DecodeChunkHeader()
 	if i.Err != nil || i.IsIndexDone {
@@ -340,7 +323,7 @@ func (i *IndexStream) StreamChunk(payWriter io.Writer) {
 	}
 
 	// pay load
-	n := i.StreamPayload(payWriter)
+	n := i.DecodeChunkPayload()
 	if i.Err != nil {
 		return
 	}
@@ -485,9 +468,10 @@ func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 	// write schema of stream to sqlite
 	go i.WriteSchemaTable(i.IndexDB)
 	// parse xbstream, generate index and parse TableSchema
+	r = io.TeeReader(r, w)
 	i.XbstreamReader = xbstream.NewReader(r)
 	for {
-		i.StreamChunk(w)
+		i.DecodeChunk()
 		if i.Err != nil || i.IsIndexDone {
 			// i.CurrentChunkIndex is pushed when next diff chunk is parsed,
 			// so last chunk is need to be pushed here
@@ -776,7 +760,7 @@ func (i *IndexStream) ExtractSingleSchema(ci *ChunkIndex, r io.ReadSeeker) {
 	if i.Err != nil || i.IsIndexDone {
 		return
 	}
-	_ = i.StreamPayload(nil)
+	_ = i.DecodeChunkPayload()
 	if i.Err != nil {
 		return
 	}
