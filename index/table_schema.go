@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/zing22845/go-frm-parser/frm"
@@ -81,7 +82,9 @@ func (ts *TableSchema) prepareStream() (err error) {
 func (ts *TableSchema) ParseSchema() {
 	defer func() {
 		if r := recover(); r != nil {
-			ts.ParseErr = fmt.Sprintf("panic occurred: %v", r)
+			stackBuf := make([]byte, 102400)
+			stackSize := runtime.Stack(stackBuf, false)
+			ts.ParseErr = fmt.Sprintf("panic occurred: %+v\nstack trace:\n%s", r, stackBuf[:stackSize])
 		}
 	}()
 	switch ts.DecompressedFileType {
