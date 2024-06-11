@@ -319,13 +319,13 @@ func (i *IndexStream) DecodeChunk(xr *xbstream.Reader, ci *ChunkIndex) *ChunkInd
 	// decode chunk header
 	header, err := DecodeChunkHeader(xr)
 	if err != nil {
-		i.Err = err
-		if i.Err == io.EOF {
+		if err == io.EOF {
 			// send last chunk index to channel
 			i.ChunkIndexChan <- ci
 			i.IsIndexDone = true
 			return ci
 		}
+		i.Err = err
 		return nil
 	}
 
