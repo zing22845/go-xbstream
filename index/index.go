@@ -235,7 +235,7 @@ func (i *IndexStream) IsNeedParsSchema(ci *ChunkIndex) bool {
 	if i.IsParseTableSchema &&
 		fileDepth == 2 &&
 		ci.DecompressedFileType == i.ParseTargetFileType &&
-		i.RegSkipPattern.MatchString(fileElements[0]) {
+		!i.RegSkipPattern.MatchString(fileElements[0]) {
 		return true
 	}
 	return false
@@ -669,12 +669,12 @@ func (i *IndexStream) ExtractSchemas(rsp *ReadSeekerPool, targetDIR string, like
 		wg.Add(1)
 		go func(ci *ChunkIndex, rs io.ReadSeeker) {
 			defer wg.Done()
+			defer rsp.Put(rs)
 			ci.DecodeFilepath()
 			err = ExtractSingleSchema(ci, i.SchemaFileChan, rs)
 			if err != nil {
 				i.Err = err
 			}
-			rsp.Put(rs)
 		}(ci, rs)
 	}
 	wg.Wait()
@@ -782,7 +782,7 @@ func ExtractSingleSchema(
 		return fmt.Errorf("chunk pay offset not equal to chunk index pay offset")
 	}
 	payLen := int64(header.PayLen)
-	n, err := DecodeSchemaByPayload(
+	_, err = DecodeSchemaByPayload(
 		schemaMap,
 		schemaChan,
 		ci,
@@ -791,7 +791,6 @@ func ExtractSingleSchema(
 	if err != nil {
 		return err
 	}
-	fmt.Printf("copied %d bytes\n", n)
 	if schema, ok := schemaMap.Get(ci.Filepath); ok {
 		_ = schema.StreamIn.Close()
 		schemaMap.Delete(ci.Filepath)
