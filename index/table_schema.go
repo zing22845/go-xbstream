@@ -23,7 +23,6 @@ type TableSchema struct {
 	ParseWarn            string         `gorm:"column:parse_warn;type:text"`
 	ParseErr             string         `gorm:"column:parse_err;type:text"`
 	DecompressErr        string         `gorm:"column:decompress_err;type:text"`
-	ParseTargetFileType  string         `gorm:"-"`
 	DecompressedFileType string         `gorm:"-"`
 	DecompressMethod     string         `gorm:"-"`
 	DecompressedFilepath string         `gorm:"-"`
@@ -37,14 +36,12 @@ type TableSchema struct {
 func NewTableSchema(
 	filepath,
 	decompressedFileType,
-	decompressMethod,
-	parseTargetFileType string,
+	decompressMethod string,
 ) (ts *TableSchema, err error) {
 	ts = &TableSchema{
 		Filepath:             filepath,
 		DecompressedFileType: decompressedFileType,
 		DecompressMethod:     decompressMethod,
-		ParseTargetFileType:  parseTargetFileType,
 	}
 	err = ts.prepareStream()
 	if err != nil {
@@ -75,7 +72,7 @@ func (ts *TableSchema) prepareStream() (err error) {
 	default:
 		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
 	}
-	ts.TableName = strings.TrimSuffix(ts.TableName, ts.ParseTargetFileType)
+	ts.TableName = strings.TrimSuffix(ts.TableName, ts.DecompressedFileType)
 	return nil
 }
 
