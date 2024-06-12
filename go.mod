@@ -2,7 +2,6 @@ module github.com/zing22845/go-xbstream
 
 require (
 	github.com/akamensky/argparse v0.0.0-20190829110830-5293d9863374
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.55.1
 	github.com/glebarez/sqlite v1.9.0
 	github.com/pkg/errors v0.9.1
 	github.com/skmcgrail/go-xbstream v1.1.0
@@ -10,7 +9,7 @@ require (
 	github.com/zing22845/go-frm-parser v0.0.0-20240608153118-f63048e4945f
 	github.com/zing22845/go-ibd2schema v0.0.0-20240520085601-89ed6b00ebc7
 	github.com/zing22845/go-qpress v0.0.0-20240520024706-6c5229d1f5eb
-	github.com/zing22845/s3readseeker v0.0.0-20240607102045-5c7c5a405778
+	github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3
 	gorm.io/gorm v1.25.4
 )
 
@@ -26,6 +25,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.3.11 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.11.11 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.17.9 // indirect
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.55.1 // indirect
 	github.com/aws/smithy-go v1.20.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

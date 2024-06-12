@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/zing22845/go-xbstream/xbstream"
+	"github.com/zing22845/readseekerpool"
 
 	"gorm.io/gorm"
 )
@@ -616,7 +617,7 @@ func (i *IndexStream) ExtractFiles(r io.ReadSeeker, targetDIR string, likePaths,
 	}
 }
 
-func (i *IndexStream) ExtractSchemas(rsp *ReadSeekerPool, targetDIR string, likePaths, notLikePaths []string) {
+func (i *IndexStream) ExtractSchemas(rsp *readseekerpool.ReadSeekerPool, targetDIR string, likePaths, notLikePaths []string) {
 	rs, err := rsp.Get()
 	if err != nil {
 		i.Err = err
