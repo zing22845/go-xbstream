@@ -85,8 +85,8 @@ github.com/zing22845/go-frm-parser v0.0.0-20240608153118-f63048e4945f h1:ZamHOCy
 github.com/zing22845/go-frm-parser v0.0.0-20240608153118-f63048e4945f/go.mod h1:0w2HSF5aqwd9nHM5/WQ177fdnpPUCYxHjon4tdaqUbA=
 github.com/zing22845/go-ibd2schema v0.0.0-20240520085601-89ed6b00ebc7 h1:6+YvXW/Aty6RiFJJiKw7B5D4EccIFiBk4bW4MUCFndI=
 github.com/zing22845/go-ibd2schema v0.0.0-20240520085601-89ed6b00ebc7/go.mod h1:wNnCT3SJGXINRuyGZiqJu7WWZkUM0b+TFKpLNh7jftk=
-github.com/zing22845/go-qpress v0.0.0-20240520024706-6c5229d1f5eb h1:0PTZr1VdWjkIr1H+oRDqB5BU5Y2Es3YRbGO20f2jP8g=
-github.com/zing22845/go-qpress v0.0.0-20240520024706-6c5229d1f5eb/go.mod h1:0KoT6taPbdD3yUtXUPMN7/ATASk+6qGuLiXTij5zgpM=
+github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931 h1:nJh6y3RhApw3sMJePyiV2hemVNLmgrVAmJnHj1YTskc=
+github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931/go.mod h1:0KoT6taPbdD3yUtXUPMN7/ATASk+6qGuLiXTij5zgpM=
 github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3 h1:foDOgRdDigGSiVrGqZ//y2pNvNG1WSvc6IJJsqMKcjo=
 github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3/go.mod h1:uQ7Go1fajionBSfCh2O/shtWf1Tn4NrGQoDotlOHv0U=
 go.uber.org/atomic v1.6.0/go.mod h1:sABNBOSYdrvTF6hTgEIbc7YasKWGhgEQZyfxyTvoXHQ=

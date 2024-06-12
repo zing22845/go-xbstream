@@ -78,9 +78,9 @@ type IndexStream struct {
 	DefaultLikePaths                  []string
 	DefaultNotLikePaths               []string
 	OpenFilesCatch                    map[string]*os.File
+	RegSkipPattern                    *regexp.Regexp
+	Err                               error
 	*MySQLServer
-	RegSkipPattern *regexp.Regexp
-	Err            error
 }
 
 func NewIndexStream(
