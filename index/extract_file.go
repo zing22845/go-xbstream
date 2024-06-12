@@ -163,7 +163,7 @@ func extractSingleChunkIndex(
 	rsp *readseekerpool.ReadSeekerPool,
 	filePath string,
 ) (n int64, err error) {
-	subChunkChan := make(chan *ChunkIndex, 10)
+	subChunkChan := make(chan *ChunkIndex, 20)
 	errChan := make(chan error, 1)
 	go func() {
 		defer func() {
