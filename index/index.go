@@ -248,48 +248,9 @@ func (i *IndexStream) DecodeChunkPayload(
 	payLen int64,
 ) (n int64, err error) {
 	if i.IsNeedParsSchema(ci) {
-		return DecodeSchemaByPayload(i.TableSchemaMap, i.SchemaFileChan, ci, r, payLen)
+		return ExtractSchemaByPayload(i.TableSchemaMap, i.SchemaFileChan, ci, r, payLen)
 	}
 	return io.CopyN(io.Discard, r, payLen)
-}
-
-func DecodeSchemaByPayload(
-	schemaMap *TableSchemaMap,
-	schemaChan chan *TableSchema,
-	ci *ChunkIndex,
-	r io.Reader,
-	payLen int64,
-) (n int64, err error) {
-	var tableSchema *TableSchema
-	if ci.PayOffset == 0 {
-		tableSchema, err = NewTableSchema(
-			ci.Filepath,
-			ci.DecompressedFileType,
-			ci.DecompressMethod,
-		)
-		if err != nil {
-			return 0, err
-		}
-		schemaMap.Set(ci.Filepath, tableSchema)
-		schemaChan <- tableSchema
-	} else {
-		var ok bool
-		tableSchema, ok = schemaMap.Get(ci.Filepath)
-		if !ok {
-			return 0, fmt.Errorf("table schema not found for %s", ci.Filepath)
-		}
-	}
-	return io.CopyN(tableSchema.StreamIn, r, payLen)
-}
-
-func DecodeChunkHeader(xr *xbstream.Reader) (header *xbstream.ChunkHeader, err error) {
-	// read header
-	header = &xbstream.ChunkHeader{}
-	err = xr.NextHeader(header)
-	if err != nil {
-		return nil, err
-	}
-	return header, nil
 }
 
 func (i *IndexStream) IndexHeader(header *xbstream.ChunkHeader, ci *ChunkIndex) (newCI *ChunkIndex) {
@@ -593,42 +554,12 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	}
 }
 
-func (i *IndexStream) ExtractFiles(r io.ReadSeeker, targetDIR string, likePaths, notLikePaths []string) {
-	// extract index file
-	i.ExtractIndexFile(r, targetDIR)
-	if i.Err != nil {
-		return
-	}
-	// connect sqlite index db
-	i.ConnectIndexDB()
-	if i.Err != nil {
-		return
-	}
-	defer i.CloseIndexDB()
-	// get first chunk_indices
-	go i.getChunkIndecis(likePaths, notLikePaths, false)
-
-	// extract schemas from index stream
-	for ci := range i.ChunkIndexChan {
-		i.ExtractSingleFile(ci, r, targetDIR)
-		if i.Err != nil {
-			return
-		}
-	}
-}
-
 func (i *IndexStream) ExtractSchemas(rsp *readseekerpool.ReadSeekerPool, targetDIR string, likePaths, notLikePaths []string) {
-	rs, err := rsp.Get()
-	if err != nil {
-		i.Err = err
-		return
-	}
 	// extract index file
-	i.ExtractIndexFile(rs, targetDIR)
+	i.ExtractIndexFile(rsp, targetDIR)
 	if i.Err != nil {
 		return
 	}
-	rsp.Put(rs)
 	// connect sqlite index db
 	i.ConnectIndexDB()
 	if i.Err != nil {
@@ -686,120 +617,7 @@ func (i *IndexStream) ExtractSchemas(rsp *readseekerpool.ReadSeekerPool, targetD
 	<-i.SchemaTableDone
 }
 
-func (i *IndexStream) ExtractSingleFile(ci *ChunkIndex, r io.ReadSeeker, targetDIR string) {
-	// seek to chunk start position
-	_, err := r.Seek(ci.StartPosition, io.SeekStart)
-	if err != nil {
-		i.Err = err
-		return
-	}
-	// read chunk
-	xr := xbstream.NewReader(r)
-	chunk, err := xr.Next()
-	if err != nil {
-		if err == io.EOF {
-			return
-		}
-		i.Err = err
-		return
-	}
-	// check stream path
-	streamPath := string(chunk.Path)
-	if streamPath != ci.Filepath {
-		i.Err = fmt.Errorf("stream path not equal to chunk path at offset %d", ci.StartPosition)
-		return
-	}
-	// create file if not exists
-	f, ok := i.OpenFilesCatch[ci.Filepath]
-	if !ok {
-		targetFilepath := filepath.Join(targetDIR, ci.Filepath)
-		err = os.MkdirAll(
-			filepath.Dir(targetFilepath),
-			0755,
-		)
-		if err != nil {
-			i.Err = err
-			return
-		}
-		f, err = os.OpenFile(
-			targetFilepath,
-			os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
-			0666,
-		)
-		if err != nil {
-			i.Err = err
-			return
-		}
-		i.OpenFilesCatch[ci.Filepath] = f
-	}
-
-	// empty file
-	if chunk.Type == xbstream.ChunkTypeEOF {
-		f.Close()
-		delete(i.OpenFilesCatch, ci.Filepath)
-		return
-	}
-	// seek to chunk pay offset
-	_, err = f.Seek(int64(chunk.PayOffset), io.SeekStart)
-	if err != nil {
-		i.Err = err
-		return
-	}
-	// checksum and write chunk pay to file
-	_, err = io.Copy(f, chunk)
-	if err != nil {
-		i.Err = err
-		return
-	}
-}
-
-func ExtractSingleSchema(
-	ci *ChunkIndex,
-	schemaChan chan *TableSchema,
-	r io.ReadSeeker,
-) (err error) {
-	/*
-		timer := utils.NewSimpleTimer()
-		timer.Start()
-	*/
-	// seek to chunk start position
-	_, err = r.Seek(ci.StartPosition, io.SeekStart)
-	if err != nil {
-		return err
-	}
-	xr := xbstream.NewReader(r)
-	// decode chunk header
-	header, err := DecodeChunkHeader(xr)
-	if err != nil {
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
-	schemaMap := &TableSchemaMap{
-		tables: make(map[string]*TableSchema),
-	}
-	if ci.PayOffset != header.PayOffset {
-		return fmt.Errorf("chunk pay offset not equal to chunk index pay offset")
-	}
-	payLen := int64(header.PayLen)
-	_, err = DecodeSchemaByPayload(
-		schemaMap,
-		schemaChan,
-		ci,
-		xr,
-		payLen)
-	if err != nil {
-		return err
-	}
-	if schema, ok := schemaMap.Get(ci.Filepath); ok {
-		_ = schema.StreamIn.Close()
-		schemaMap.Delete(ci.Filepath)
-	}
-	return nil
-}
-
-func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
+func (i *IndexStream) ExtractIndexFile(rsp *readseekerpool.ReadSeekerPool, targetDIR string) {
 	// get index file offset file name from index file name
 	if i.IndexFilename == "" {
 		i.Err = fmt.Errorf("both index file name and offset file name not found")
@@ -811,13 +629,26 @@ func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 		(xbstream.ChunkHeaderFixSize+len([]byte(i.IndexFileOffsetFilename)))*2 + // (14 + len("package.tar.gz.db.offset")) * 2
 			(xbstream.ChunkPayFixSize + OffsetBytesLen), // 20 + 8 last chunk without pay
 	)
-	// extract index file offset file
-	n, err := ExtractSingleFile(
-		r,
-		i.IndexFileOffsetFilename,
-		targetDIR,
-		-i.IndexFileOffsetFileChunkTotalSize,
-		io.SeekEnd)
+	cis := make(chan *ChunkIndex, 1)
+	rs, err := rsp.Get()
+	if err != nil {
+		i.Err = err
+		return
+	}
+	offset, err := rs.Seek(-i.IndexFileOffsetFileChunkTotalSize, io.SeekEnd)
+	if err != nil {
+		i.Err = err
+		return
+	}
+	rsp.Put(rs)
+	ci := &ChunkIndex{
+		Filepath:      i.IndexFileOffsetFilename,
+		StartPosition: offset,
+		EndPosition:   offset + i.IndexFileOffsetFileChunkTotalSize,
+	}
+	cis <- ci
+	close(cis)
+	n, err := ExtractFile(rsp, cis, i.IndexFileOffsetFilename, targetDIR)
 	if err != nil {
 		i.Err = err
 		return
@@ -838,13 +669,20 @@ func (i *IndexStream) ExtractIndexFile(r io.ReadSeeker, targetDIR string) {
 		return
 	}
 	// extract index file
+	ci = &ChunkIndex{
+		Filepath:      i.IndexFilename,
+		StartPosition: i.IndexFileOffsetStart,
+		EndPosition:   offset,
+	}
+	cis = make(chan *ChunkIndex, 1)
+	cis <- ci
+	close(cis)
 	i.IndexFilePath = filepath.Join(targetDIR, i.IndexFilename)
-	_, err = ExtractSingleFile(
-		r,
+	_, err = ExtractFile(
+		rsp,
+		cis,
 		i.IndexFilename,
 		targetDIR,
-		i.IndexFileOffsetStart,
-		io.SeekStart,
 	)
 	if err != nil {
 		i.Err = err

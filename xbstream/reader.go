@@ -47,7 +47,7 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 	header.PrefixHeader = make([]uint8, ChunkHeaderFixSize)
 
 	// Read Prefix bytes
-	if _, err = r.Read(header.PrefixHeader); err != nil {
+	if _, err = r.reader.Read(header.PrefixHeader); err != nil {
 		// We should gracefully bubble up EOF if we attempt to read a new Chunk and hit EOF
 		if err != io.EOF {
 			return ErrReadHeaderFix
@@ -78,7 +78,7 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 	// Path
 	if header.PathLen > 0 {
 		header.Path = make([]uint8, header.PathLen)
-		if _, err = r.Read(header.Path); err != nil {
+		if _, err = r.reader.Read(header.Path); err != nil {
 			return ErrReadPath
 		}
 	}
@@ -88,7 +88,7 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 		return nil
 	}
 	header.PayFix = make([]uint8, ChunkPayFixSize)
-	if _, err = r.Read(header.PayFix); err != nil {
+	if _, err = r.reader.Read(header.PayFix); err != nil {
 		return ErrReadPayFix
 	}
 	header.PayLen = binary.LittleEndian.Uint64(header.PayFix)
@@ -126,6 +126,28 @@ func (r *Reader) Next() (*Chunk, error) {
 	}
 
 	return chunk, nil
+}
+
+// WriteAt read header from reader and write payload to w at payOffset
+func (r *Reader) ExtractChunk(ws io.WriteSeeker) (header *ChunkHeader, err error) {
+	header = new(ChunkHeader)
+	err = r.NextHeader(header)
+	if err != nil {
+		return nil, err
+	}
+	// no need to extract payload (EOF)
+	if header.PayLen == 0 {
+		return header, nil
+	}
+	_, err = ws.Seek(int64(header.PayOffset), io.SeekStart)
+	if err != nil {
+		return header, err
+	}
+	_, err = io.CopyN(ws, r.reader, int64(header.PayLen))
+	if err != nil {
+		return header, err
+	}
+	return header, nil
 }
 
 func validateChunkType(p ChunkType) ChunkType {
