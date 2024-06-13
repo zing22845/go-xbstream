@@ -6,7 +6,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/skmcgrail/go-xbstream v1.1.0
 	github.com/stretchr/testify v1.8.4
-	github.com/zing22845/go-frm-parser v0.0.0-20240613032528-03ee6f9c7966
+	github.com/zing22845/go-frm-parser v0.0.0-20240613071137-d3ccb45b16f0
 	github.com/zing22845/go-ibd2schema v0.0.0-20240520085601-89ed6b00ebc7
 	github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931
 	github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3
