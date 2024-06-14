@@ -2,6 +2,8 @@ package index
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -260,4 +262,58 @@ func ExtractFile(
 		return -1, errors.Errorf("expected file size %d, got %d", fileSize, writtenSize)
 	}
 	return fileSize, nil
+}
+
+func ExtractFiles(r io.Reader, targetDIR string) (n int64, err error) {
+	files := make(map[string]*os.File)
+
+	xr := xbstream.NewReader(r)
+	for {
+		chunk, err := xr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return -1, err
+		}
+		fPath := string(chunk.Path)
+		// create target file if not exists
+		f, ok := files[fPath]
+		if !ok {
+			targetFilepath := filepath.Join(targetDIR, fPath)
+			if err = os.MkdirAll(filepath.Dir(targetFilepath), 0777); err != nil {
+				return -1, err
+			}
+			f, err = os.OpenFile(
+				targetFilepath,
+				os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+				0666,
+			)
+			if err != nil {
+				return -1, err
+			}
+			files[fPath] = f
+		}
+
+		if chunk.Type == xbstream.ChunkTypeEOF {
+			f.Close()
+			continue
+		}
+
+		crc32Hash := crc32.NewIEEE()
+		tReader := io.TeeReader(chunk, crc32Hash)
+		_, err = f.Seek(int64(chunk.PayOffset), io.SeekStart)
+		if err != nil {
+			return -1, err
+		}
+		m, err := io.Copy(f, tReader)
+		if err != nil {
+			return -1, err
+		}
+		if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
+			return -1, errors.Errorf("chunk checksum mismatch")
+		}
+		n += m
+	}
+	return n, nil
 }
