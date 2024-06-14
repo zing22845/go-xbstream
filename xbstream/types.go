@@ -49,6 +49,7 @@ const (
 	ChecksumBytesLen             = unsafe.Sizeof(ChunkHeader{}.Checksum)
 	ChunkPayFixSize              = int(PayLenBytesLen + PayOffsetBytesLen + ChecksumBytesLen)
 )
+const FieldSize = unsafe.Sizeof(ChunkHeader{}.PayOffset)
 
 const (
 	// ChunkTypePayload indicates chunk contains file payload
@@ -60,7 +61,7 @@ const (
 )
 
 var (
-	chunkMagic       = []uint8(MagicStr)
+	ChunkMagic       = []uint8(MagicStr)
 	ErrReadHeaderFix = errors.New("xbstream read header fix error")
 	ErrStreamRead    = errors.New("xbstream read error")
 	ErrReadPath      = errors.New("xbstream read path error")
@@ -86,4 +87,5 @@ type ChunkHeader struct {
 	PayOffset    uint64
 	Checksum     uint32
 	HeaderSize   uint32
+	ReadSize     int64
 }

@@ -59,7 +59,7 @@ func TestNewReader(t *testing.T) {
 
 	// file1 chunk payload
 	expected = ChunkHeader{
-		Magic:     chunkMagic,
+		Magic:     ChunkMagic,
 		Flags:     0,
 		Type:      ChunkTypePayload,
 		PathLen:   5,
@@ -77,7 +77,7 @@ func TestNewReader(t *testing.T) {
 
 	// file1 EOF
 	expected = ChunkHeader{
-		Magic:     chunkMagic,
+		Magic:     ChunkMagic,
 		Flags:     0,
 		Type:      ChunkTypeEOF,
 		PathLen:   5,
@@ -92,7 +92,7 @@ func TestNewReader(t *testing.T) {
 
 	// file2 chunk payload
 	expected = ChunkHeader{
-		Magic:     chunkMagic,
+		Magic:     ChunkMagic,
 		Flags:     0,
 		Type:      ChunkTypePayload,
 		PathLen:   5,
@@ -109,7 +109,7 @@ func TestNewReader(t *testing.T) {
 
 	// file2 EOF
 	expected = ChunkHeader{
-		Magic:     chunkMagic,
+		Magic:     ChunkMagic,
 		Flags:     0,
 		Type:      ChunkTypeEOF,
 		PathLen:   5,

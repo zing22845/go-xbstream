@@ -93,8 +93,8 @@ func (f *File) writeChunk(p []byte) error {
 	chunk := new(ChunkHeader)
 
 	// Chunk Magic
-	chunk.Magic = make([]uint8, len(chunkMagic))
-	copy(chunk.Magic, chunkMagic)
+	chunk.Magic = make([]uint8, len(ChunkMagic))
+	copy(chunk.Magic, ChunkMagic)
 	if err = binary.Write(buffer, binary.BigEndian, &chunk.Magic); err != nil {
 		return err
 	}
@@ -168,8 +168,8 @@ func (f *File) writeEOF() error {
 	defer f.writer.mutex.Unlock()
 
 	// Chunk Magic
-	chunk.Magic = make([]uint8, len(chunkMagic))
-	copy(chunk.Magic, chunkMagic)
+	chunk.Magic = make([]uint8, len(ChunkMagic))
+	copy(chunk.Magic, ChunkMagic)
 	if err = binary.Write(buffer, binary.BigEndian, &chunk.Magic); err != nil {
 		return err
 	}

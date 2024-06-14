@@ -47,7 +47,9 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 	header.PrefixHeader = make([]uint8, ChunkHeaderFixSize)
 
 	// Read Prefix bytes
-	if _, err = r.reader.Read(header.PrefixHeader); err != nil {
+	n, err := r.reader.Read(header.PrefixHeader)
+	header.ReadSize += int64(n)
+	if err != nil {
 		// We should gracefully bubble up EOF if we attempt to read a new Chunk and hit EOF
 		if err != io.EOF {
 			return ErrReadHeaderFix
@@ -56,7 +58,7 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 	}
 	header.Magic = header.PrefixHeader[:MagicLen]
 
-	if !bytes.Equal(header.Magic, chunkMagic) {
+	if !bytes.Equal(header.Magic, ChunkMagic) {
 		return fmt.Errorf("wrong chunk magic: %s", header.Magic)
 	}
 
@@ -78,9 +80,12 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 	// Path
 	if header.PathLen > 0 {
 		header.Path = make([]uint8, header.PathLen)
-		if _, err = r.reader.Read(header.Path); err != nil {
+		n, err = r.reader.Read(header.Path)
+		header.ReadSize += int64(n)
+		if err != nil {
 			return ErrReadPath
 		}
+
 	}
 	header.HeaderSize += header.PathLen
 
@@ -88,7 +93,9 @@ func (r *Reader) NextHeader(header *ChunkHeader) (err error) {
 		return nil
 	}
 	header.PayFix = make([]uint8, ChunkPayFixSize)
-	if _, err = r.reader.Read(header.PayFix); err != nil {
+	n, err = r.reader.Read(header.PayFix)
+	header.ReadSize += int64(n)
+	if err != nil {
 		return ErrReadPayFix
 	}
 	header.PayLen = binary.LittleEndian.Uint64(header.PayFix)
@@ -108,7 +115,7 @@ func (r *Reader) Next() (*Chunk, error) {
 
 	err = r.NextHeader(&chunk.ChunkHeader)
 	if err != nil {
-		return nil, err
+		return chunk, err
 	}
 
 	if chunk.Type == ChunkTypeEOF {
@@ -117,8 +124,11 @@ func (r *Reader) Next() (*Chunk, error) {
 
 	if chunk.PayLen > 0 {
 		buffer := bytes.NewBuffer(nil)
-		if _, err := io.CopyN(buffer, r.reader, int64(chunk.PayLen)); err != nil {
-			return nil, ErrStreamRead
+		payLen := int64(chunk.PayLen)
+		n, err := io.CopyN(buffer, r.reader, payLen)
+		chunk.ReadSize += n
+		if err != nil {
+			return chunk, ErrStreamRead
 		}
 		chunk.Reader = buffer
 	} else {
