@@ -51,13 +51,9 @@ func NewTableSchema(
 }
 
 func (ts *TableSchema) prepareStream() (err error) {
-	schema, table := filepath.Split(ts.Filepath)
-	schema = strings.TrimSuffix(schema, "/")
-	ts.SchemaName, err = frmutils.DecodeMySQLFile2Object(schema)
-	if err != nil {
-		return err
-	}
-	ts.TableName, err = frmutils.DecodeMySQLFile2Object(table)
+	ts.SchemaName, ts.TableName = filepath.Split(ts.Filepath)
+	ts.SchemaName = strings.TrimSuffix(ts.SchemaName, "/")
+	ts.SchemaName, err = frmutils.DecodeMySQLFile2Object(ts.SchemaName)
 	if err != nil {
 		return err
 	}
@@ -72,7 +68,6 @@ func (ts *TableSchema) prepareStream() (err error) {
 	default:
 		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
 	}
-	ts.TableName = strings.TrimSuffix(ts.TableName, ts.DecompressedFileType)
 	return nil
 }
 
@@ -145,6 +140,7 @@ func (ts *TableSchema) parseFrmFile() (err error) {
 	if err != nil {
 		return err
 	}
+	ts.TableName = result.GetName()
 	ts.CreateStatement = result.String()
 	return nil
 }
