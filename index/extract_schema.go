@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/zing22845/go-xbstream/xbstream"
 )
 
@@ -15,6 +16,14 @@ func ExtractSchemaByPayload(
 	payLen int64,
 ) (n int64, err error) {
 	var tableSchema *TableSchema
+	defer func() {
+		if tableSchema == nil {
+			n, err = io.CopyN(io.Discard, r, payLen)
+		} else {
+			n, err = io.CopyN(tableSchema.StreamIn, r, payLen)
+		}
+	}()
+	log.Infof("Extracting schema for %s, payOffset: %d", ci.Filepath, ci.PayOffset)
 	if ci.PayOffset == 0 {
 		tableSchema, err = NewTableSchema(
 			ci.Filepath,
@@ -33,7 +42,7 @@ func ExtractSchemaByPayload(
 			return 0, fmt.Errorf("table schema not found for %s", ci.Filepath)
 		}
 	}
-	return io.CopyN(tableSchema.StreamIn, r, payLen)
+	return n, err
 }
 
 func DecodeChunkHeader(xr *xbstream.Reader) (header *xbstream.ChunkHeader, err error) {

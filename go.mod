@@ -4,8 +4,10 @@ require (
 	github.com/akamensky/argparse v0.0.0-20190829110830-5293d9863374
 	github.com/glebarez/sqlite v1.9.0
 	github.com/pkg/errors v0.9.1
+	github.com/sirupsen/logrus v1.9.3
 	github.com/skmcgrail/go-xbstream v1.1.0
 	github.com/stretchr/testify v1.8.4
+	github.com/thomas-tacquet/gormv2-logrus v1.2.3
 	github.com/zing22845/go-frm-parser v0.0.0-20240616151208-0796627d6a98
 	github.com/zing22845/go-ibd2schema v0.0.0-20240520085601-89ed6b00ebc7
 	github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931
@@ -46,7 +48,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/exp v0.0.0-20240205201215-2c58cdc269a3 // indirect
-	golang.org/x/sys v0.7.0 // indirect
+	golang.org/x/sys v0.9.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

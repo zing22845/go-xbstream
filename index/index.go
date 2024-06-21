@@ -11,11 +11,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	log "github.com/sirupsen/logrus"
+	gormv2logrus "github.com/thomas-tacquet/gormv2-logrus"
 	"github.com/zing22845/go-xbstream/xbstream"
 	"github.com/zing22845/readseekerpool"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -80,6 +84,7 @@ type IndexStream struct {
 	OpenFilesCatch                    map[string]*os.File
 	RegSkipPattern                    *regexp.Regexp
 	Err                               error
+	GormLogger                        *gormv2logrus.Gormlog
 	*MySQLServer
 }
 
@@ -106,6 +111,16 @@ func NewIndexStream(
 		MySQLServer: &MySQLServer{
 			MySQLVersion: mysqlVersion,
 		},
+		GormLogger: gormv2logrus.NewGormlog(
+			gormv2logrus.WithLogrus(log.StandardLogger()),
+			gormv2logrus.WithGormOptions(
+				gormv2logrus.GormOptions{
+					SlowThreshold: 800 * time.Millisecond,
+					LogLevel:      logger.LogLevel(log.GetLevel()),
+					LogLatency:    true,
+				},
+			),
+		),
 	}
 	i.prepareParseSchema()
 	i.Offset.Store(0)
@@ -137,6 +152,7 @@ func (i *IndexStream) ConnectIndexDB() {
 		i.Err = err
 		return
 	}
+	db.Logger = i.GormLogger
 	i.IndexDB = db
 }
 
