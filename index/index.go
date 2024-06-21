@@ -280,6 +280,7 @@ func (i *IndexStream) IndexHeader(header *xbstream.ChunkHeader, ci *ChunkIndex) 
 	filepath := string(header.Path)
 	if filepath == ci.Filepath {
 		ci.EndPosition = i.Offset.Load()
+		ci.PayOffset = header.PayOffset
 	} else {
 		// new file
 		i.ChunkIndexChan <- ci

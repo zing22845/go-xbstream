@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/zing22845/go-xbstream/xbstream"
 )
 
@@ -22,9 +21,7 @@ func ExtractSchemaByPayload(
 		} else {
 			n, err = io.CopyN(tableSchema.StreamIn, r, payLen)
 		}
-		log.Infof("extract schema for %s end", ci.Filepath)
 	}()
-	log.Infof("extracting schema for %s, payOffset: %d", ci.Filepath, ci.PayOffset)
 	if ci.PayOffset == 0 {
 		tableSchema, err = NewTableSchema(
 			ci.Filepath,
