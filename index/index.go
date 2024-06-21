@@ -287,6 +287,7 @@ func (i *IndexStream) IndexHeader(header *xbstream.ChunkHeader, ci *ChunkIndex) 
 			Filepath:      filepath,
 			StartPosition: ci.EndPosition,
 			EndPosition:   i.Offset.Load(),
+			PayOffset:     header.PayOffset,
 		}
 	}
 	ci.DecodeFilepath()

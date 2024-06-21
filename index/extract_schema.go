@@ -22,8 +22,9 @@ func ExtractSchemaByPayload(
 		} else {
 			n, err = io.CopyN(tableSchema.StreamIn, r, payLen)
 		}
+		log.Infof("extract schema for %s end", ci.Filepath)
 	}()
-	log.Infof("Extracting schema for %s, payOffset: %d", ci.Filepath, ci.PayOffset)
+	log.Infof("extracting schema for %s, payOffset: %d", ci.Filepath, ci.PayOffset)
 	if ci.PayOffset == 0 {
 		tableSchema, err = NewTableSchema(
 			ci.Filepath,
