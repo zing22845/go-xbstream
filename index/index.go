@@ -85,6 +85,7 @@ type IndexStream struct {
 	RegSkipPattern                    *regexp.Regexp
 	Err                               error
 	GormLogger                        *gormv2logrus.Gormlog
+	IsRemoveLocalIndexFile            bool
 	*MySQLServer
 }
 
@@ -93,6 +94,7 @@ func NewIndexStream(
 	indexFilename string,
 	baseDIR string,
 	mysqlVersion string,
+	isRemoveLocalIndexFile bool,
 ) *IndexStream {
 	i := &IndexStream{
 		IndexFilePath: filepath.Join(baseDIR, indexFilename),
@@ -121,6 +123,7 @@ func NewIndexStream(
 				},
 			),
 		),
+		IsRemoveLocalIndexFile: isRemoveLocalIndexFile,
 	}
 	i.prepareParseSchema()
 	i.Offset.Store(0)
@@ -200,15 +203,21 @@ func (i *IndexStream) insertMySQLServer(db *gorm.DB) {
 }
 
 func (i *IndexStream) ParseSchemaFile() {
+	var wg sync.WaitGroup
 	defer func() {
+		wg.Wait()
 		i.ParserSchemaFileDone <- struct{}{}
 	}()
 	for tableSchema := range i.SchemaFileChan {
 		if tableSchema.Filepath == "" {
 			continue
 		}
-		tableSchema.ParseSchema()
-		i.TableSchemaChan <- tableSchema
+		wg.Add(1)
+		func(ts *TableSchema) {
+			defer wg.Done()
+			tableSchema.ParseSchema()
+			i.TableSchemaChan <- tableSchema
+		}(tableSchema)
 	}
 }
 
