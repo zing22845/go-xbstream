@@ -199,21 +199,15 @@ func (i *IndexStream) insertMySQLServer(db *gorm.DB) {
 }
 
 func (i *IndexStream) ParseSchemaFile() {
-	var wg sync.WaitGroup
 	defer func() {
-		wg.Wait()
 		i.ParserSchemaFileDone <- struct{}{}
 	}()
 	for tableSchema := range i.SchemaFileChan {
 		if tableSchema.Filepath == "" {
 			continue
 		}
-		wg.Add(1)
-		func(ts *TableSchema) {
-			defer wg.Done()
-			tableSchema.ParseSchema()
-			i.TableSchemaChan <- tableSchema
-		}(tableSchema)
+		tableSchema.ParseSchema()
+		i.TableSchemaChan <- tableSchema
 	}
 }
 
