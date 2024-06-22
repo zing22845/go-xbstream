@@ -60,7 +60,6 @@ type IndexStream struct {
 	Cancel                            context.CancelFunc
 	Offset                            atomic.Int64
 	ChunkIndexChan                    chan *ChunkIndex
-	TableSchemaMap                    *TableSchemaMap
 	SchemaFileChan                    chan *TableSchema
 	TableSchemaChan                   chan *TableSchema
 	IsParseTableSchema                bool
@@ -97,11 +96,8 @@ func NewIndexStream(
 	isRemoveLocalIndexFile bool,
 ) *IndexStream {
 	i := &IndexStream{
-		IndexFilePath: filepath.Join(baseDIR, indexFilename),
-		IndexFilename: indexFilename,
-		TableSchemaMap: &TableSchemaMap{
-			tables: make(map[string]*TableSchema),
-		},
+		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
+		IndexFilename:        indexFilename,
 		ChunkIndexChan:       make(chan *ChunkIndex, 100),
 		TableSchemaChan:      make(chan *TableSchema, 100),
 		SchemaFileChan:       make(chan *TableSchema, 100),
@@ -273,7 +269,7 @@ func (i *IndexStream) DecodeChunkPayload(
 	payLen int64,
 ) (n int64, err error) {
 	if i.IsNeedParsSchema(ci) {
-		return ExtractSchemaByPayload(i.TableSchemaMap, i.SchemaFileChan, ci, r, payLen)
+		return ExtractSchemaByPayload(i.SchemaFileChan, ci, r, payLen)
 	}
 	return io.CopyN(io.Discard, r, payLen)
 }
@@ -326,10 +322,6 @@ func (i *IndexStream) DecodeChunk(xr *xbstream.Reader, ci *ChunkIndex) *ChunkInd
 
 	// type EOF (end of inner file)
 	if header.Type == xbstream.ChunkTypeEOF {
-		if tableSchema, ok := i.TableSchemaMap.Get(ci.Filepath); ok {
-			_ = tableSchema.StreamIn.Close()
-			i.TableSchemaMap.Delete(ci.Filepath)
-		}
 		return ci
 	}
 

@@ -8,20 +8,12 @@ import (
 )
 
 func ExtractSchemaByPayload(
-	schemaMap *TableSchemaMap,
 	schemaChan chan *TableSchema,
 	ci *ChunkIndex,
 	r io.Reader,
 	payLen int64,
 ) (n int64, err error) {
 	var tableSchema *TableSchema
-	defer func() {
-		if tableSchema == nil {
-			n, err = io.CopyN(io.Discard, r, payLen)
-		} else {
-			n, err = io.CopyN(tableSchema.StreamIn, r, payLen)
-		}
-	}()
 	if ci.PayOffset == 0 {
 		tableSchema, err = NewTableSchema(
 			ci.Filepath,
@@ -29,18 +21,14 @@ func ExtractSchemaByPayload(
 			ci.DecompressMethod,
 		)
 		if err != nil {
-			return 0, err
+			n, _ = io.CopyN(io.Discard, r, payLen)
+			return n, err
 		}
-		schemaMap.Set(ci.Filepath, tableSchema)
+		defer tableSchema.StreamIn.Close()
 		schemaChan <- tableSchema
-	} else {
-		var ok bool
-		tableSchema, ok = schemaMap.Get(ci.Filepath)
-		if !ok {
-			return 0, fmt.Errorf("table schema not found for %s", ci.Filepath)
-		}
+		return io.CopyN(tableSchema.StreamIn, r, payLen)
 	}
-	return n, err
+	return io.CopyN(io.Discard, r, payLen)
 }
 
 func DecodeChunkHeader(xr *xbstream.Reader) (header *xbstream.ChunkHeader, err error) {
@@ -76,25 +64,17 @@ func ExtractSingleSchema(
 		}
 		return err
 	}
-	schemaMap := &TableSchemaMap{
-		tables: make(map[string]*TableSchema),
-	}
 	if ci.PayOffset != header.PayOffset {
 		return fmt.Errorf("chunk pay offset not equal to chunk index pay offset")
 	}
 	payLen := int64(header.PayLen)
 	_, err = ExtractSchemaByPayload(
-		schemaMap,
 		schemaChan,
 		ci,
 		xr,
 		payLen)
 	if err != nil {
 		return err
-	}
-	if schema, ok := schemaMap.Get(ci.Filepath); ok {
-		_ = schema.StreamIn.Close()
-		schemaMap.Delete(ci.Filepath)
 	}
 	return nil
 }
