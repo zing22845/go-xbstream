@@ -365,7 +365,9 @@ func (i *IndexStream) StreamIndexFile(w io.WriteCloser) {
 		if err != nil {
 			return
 		}
-		_ = os.Remove(i.IndexFilePath)
+		if i.IsRemoveLocalIndexFile {
+			_ = os.Remove(i.IndexFilePath)
+		}
 	}()
 	fw, err := xw.Create(i.IndexFilename)
 	if err != nil {
