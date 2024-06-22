@@ -131,7 +131,7 @@ func (ts *TableSchema) parseFrmFile() (err error) {
 	}()
 	go func() {
 		// file is qp compressed
-		err = ts.decompressStream()
+		err := ts.decompressStream()
 		if err != nil {
 			ts.DecompressErr = err.Error()
 			return
@@ -153,7 +153,7 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 	}()
 	go func() {
 		// file is qp compressed
-		err = ts.decompressStream()
+		err := ts.decompressStream()
 		if err != nil {
 			ts.DecompressErr = err.Error()
 			return
