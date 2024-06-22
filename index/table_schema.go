@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/zing22845/go-frm-parser/frm"
 	frmutils "github.com/zing22845/go-frm-parser/frm/utils"
 	"github.com/zing22845/go-ibd2schema"
@@ -158,6 +159,11 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 			return
 		}
 	}()
+	ts.TableName = strings.TrimSuffix(ts.TableName, ".ibd")
+	ts.TableName, err = frmutils.DecodeMySQLFile2Object(ts.TableName)
+	if err != nil {
+		return err
+	}
 	tableSpace, err := ibd2schema.NewTableSpace(ts.ParseOut)
 	if err != nil {
 		return err
@@ -169,11 +175,12 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 	for db, table := range tableSpace.TableSchemas {
 		if !strings.EqualFold(ts.SchemaName, db) ||
 			!strings.EqualFold(ts.TableName, table.Name) {
+			log.Infof("unexpected db(%s) or table name(%s) in file %s",
+				db, table.Name, ts.Filepath)
 			continue
 		}
-		ts.SchemaName = db
-		ts.TableName = table.Name
 		ts.CreateStatement = table.DDL
+		break
 	}
 	if ts.CreateStatement == "" {
 		return fmt.Errorf("ddl of `%s`.`%s` not found in file %s", ts.SchemaName, ts.TableName, ts.Filepath)
