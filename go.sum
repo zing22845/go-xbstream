@@ -96,8 +96,8 @@ github.com/zing22845/go-ibd2schema v0.0.0-20240623143809-6ae9d2e38f86 h1:KxipRBb
 github.com/zing22845/go-ibd2schema v0.0.0-20240623143809-6ae9d2e38f86/go.mod h1:wNnCT3SJGXINRuyGZiqJu7WWZkUM0b+TFKpLNh7jftk=
 github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931 h1:nJh6y3RhApw3sMJePyiV2hemVNLmgrVAmJnHj1YTskc=
 github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931/go.mod h1:0KoT6taPbdD3yUtXUPMN7/ATASk+6qGuLiXTij5zgpM=
-github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3 h1:foDOgRdDigGSiVrGqZ//y2pNvNG1WSvc6IJJsqMKcjo=
-github.com/zing22845/readseekerpool v0.0.0-20240612023658-6d83290939b3/go.mod h1:uQ7Go1fajionBSfCh2O/shtWf1Tn4NrGQoDotlOHv0U=
+github.com/zing22845/readseekerpool v0.0.0-20240623144742-c140b312a124 h1:saRv7wW3zmol2xA5X10YWEqw9ZOfXCg3rnvj9BOkids=
+github.com/zing22845/readseekerpool v0.0.0-20240623144742-c140b312a124/go.mod h1:rRipZy5vlR74AOxPENtPbScD1y1om3oWrWezvwSBC20=
 go.uber.org/atomic v1.6.0/go.mod h1:sABNBOSYdrvTF6hTgEIbc7YasKWGhgEQZyfxyTvoXHQ=
 go.uber.org/atomic v1.7.0/go.mod h1:fEN4uk6kAWBTFdckzkM89CLk9XfWZrxpCo0nPH17wJc=
 go.uber.org/atomic v1.9.0/go.mod h1:fEN4uk6kAWBTFdckzkM89CLk9XfWZrxpCo0nPH17wJc=
