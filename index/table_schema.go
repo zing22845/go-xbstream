@@ -32,6 +32,7 @@ type TableSchema struct {
 	ParseIn              *io.PipeWriter `gorm:"-"`
 	ParseOut             *io.PipeReader `gorm:"-"`
 	ParseDone            chan struct{}  `gorm:"-"`
+	IsHidden             bool           `gorm:"-"`
 }
 
 func NewTableSchema(
@@ -178,6 +179,10 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 			log.Infof("unexpected db(%s) or table name(%s) in file %s",
 				db, table.Name, ts.Filepath)
 			continue
+		}
+		if table.Hidden != ibd2schema.HT_VISIBLE {
+			ts.IsHidden = true
+			return nil
 		}
 		ts.CreateStatement = table.DDL
 		break

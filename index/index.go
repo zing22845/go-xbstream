@@ -207,6 +207,9 @@ func (i *IndexStream) ParseSchemaFile() {
 			continue
 		}
 		tableSchema.ParseSchema()
+		if tableSchema.IsHidden {
+			continue
+		}
 		i.TableSchemaChan <- tableSchema
 	}
 }
