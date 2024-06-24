@@ -9,7 +9,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/thomas-tacquet/gormv2-logrus v1.2.3
 	github.com/zing22845/go-frm-parser v0.0.0-20240616151208-0796627d6a98
-	github.com/zing22845/go-ibd2schema v0.0.0-20240624031122-f76d381501c1
+	github.com/zing22845/go-ibd2schema v0.0.0-20240624042604-90ba8479ee07
 	github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931
 	github.com/zing22845/readseekerpool v0.0.0-20240623144742-c140b312a124
 	gorm.io/gorm v1.25.4
