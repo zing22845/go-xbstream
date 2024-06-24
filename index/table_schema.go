@@ -184,11 +184,14 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 			ts.IsHidden = true
 			return nil
 		}
+		if table.DDL == "" {
+			return fmt.Errorf("DDL of `%s`.`%s` is empty in file %s", db, table.Name, ts.Filepath)
+		}
 		ts.CreateStatement = table.DDL
-		break
+		return nil
 	}
 	if ts.CreateStatement == "" {
-		return fmt.Errorf("ddl of `%s`.`%s` not found in file %s", ts.SchemaName, ts.TableName, ts.Filepath)
+		return fmt.Errorf("no matching DDL of `%s`.`%s` found in file %s", ts.SchemaName, ts.TableName, ts.Filepath)
 	}
 	return nil
 }
