@@ -258,7 +258,8 @@ func (i *IndexStream) WriteSchemaTable(db *gorm.DB) {
 					log.Warnf("create meilisearch documents task(%d) failed %+v",
 						task.TaskUID, err)
 				}
-				log.Infof("id_prefix: %s, taskUID: %d", i.MeilisearchDefaultDoc["id_prefix"], task.TaskUID)
+				log.Infof("id_prefix: %s, doc count: %d, taskUID: %d",
+					i.MeilisearchDefaultDoc["id_prefix"], len(batchDoc), task.TaskUID)
 			}
 			// Clear the batch without re-allocating memory.
 			batchSchema = batchSchema[:0]
