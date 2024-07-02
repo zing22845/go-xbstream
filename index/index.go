@@ -240,12 +240,11 @@ func (i *IndexStream) WriteSchemaTable(db *gorm.DB) {
 		}
 		batchSchema = append(batchSchema, tableSchema)
 		if i.MeilisearchIndex != nil {
-			task, err := i.MeilisearchIndex.AddDocuments(batchDoc)
+			doc, err := tableSchema.GetMeiliSearchDoc(i.MeilisearchDefaultDoc)
 			if err != nil {
-				log.Warnf("create meilisearch documents task(%d) failed %+v",
-					task.TaskUID, err)
+				log.Warnf("get meilisearch document failed %+v", err)
 			}
-			log.Infof("id_prefix: %s, taskUID: %d", i.MeilisearchDefaultDoc["id_prefix"], task.TaskUID)
+			batchDoc = append(batchDoc, doc)
 		}
 		if len(batchSchema) == i.SchemaTableBatchSize {
 			i.insertBatchSchema(batchSchema, db)
