@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meilisearch/meilisearch-go"
 	log "github.com/sirupsen/logrus"
 	gormv2logrus "github.com/thomas-tacquet/gormv2-logrus"
 	"github.com/zing22845/go-xbstream/xbstream"
@@ -85,6 +86,8 @@ type IndexStream struct {
 	Err                               error
 	GormLogger                        *gormv2logrus.Gormlog
 	IsRemoveLocalIndexFile            bool
+	MeilisearchIndex                  *meilisearch.Index
+	MeilisearchDefaultDoc             map[string]interface{}
 	*MySQLServer
 }
 
@@ -94,6 +97,8 @@ func NewIndexStream(
 	baseDIR string,
 	mysqlVersion string,
 	isRemoveLocalIndexFile bool,
+	meilisearchIndex *meilisearch.Index,
+	meilisearchDefaultDoc map[string]interface{},
 ) *IndexStream {
 	i := &IndexStream{
 		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
@@ -120,6 +125,8 @@ func NewIndexStream(
 			),
 		),
 		IsRemoveLocalIndexFile: isRemoveLocalIndexFile,
+		MeilisearchIndex:       meilisearchIndex,
+		MeilisearchDefaultDoc:  meilisearchDefaultDoc,
 	}
 	i.prepareParseSchema()
 	i.Offset.Store(0)
@@ -216,6 +223,10 @@ func (i *IndexStream) ParseSchemaFile() {
 
 func (i *IndexStream) WriteSchemaTable(db *gorm.DB) {
 	batchSchema := make([]*TableSchema, 0, i.SchemaTableBatchSize)
+	var batchDoc []map[string]interface{}
+	if i.MeilisearchIndex != nil {
+		batchDoc = make([]map[string]interface{}, 0, i.SchemaTableBatchSize)
+	}
 	defer func() {
 		// Insert any remaining records.
 		if len(batchSchema) > 0 {
@@ -228,13 +239,30 @@ func (i *IndexStream) WriteSchemaTable(db *gorm.DB) {
 			continue
 		}
 		batchSchema = append(batchSchema, tableSchema)
+		if i.MeilisearchIndex != nil {
+			task, err := i.MeilisearchIndex.AddDocuments(batchDoc)
+			if err != nil {
+				log.Warnf("create meilisearch documents task(%d) failed %+v",
+					task.TaskUID, err)
+			}
+			log.Infof("id_prefix: %s, taskUID: %d", i.MeilisearchDefaultDoc["id_prefix"], task.TaskUID)
+		}
 		if len(batchSchema) == i.SchemaTableBatchSize {
 			i.insertBatchSchema(batchSchema, db)
 			if i.Err != nil {
 				return
 			}
+			if i.MeilisearchIndex != nil {
+				task, err := i.MeilisearchIndex.AddDocuments(batchDoc)
+				if err != nil {
+					log.Warnf("create meilisearch documents task(%d) failed %+v",
+						task.TaskUID, err)
+				}
+				log.Infof("id_prefix: %s, taskUID: %d", i.MeilisearchDefaultDoc["id_prefix"], task.TaskUID)
+			}
 			// Clear the batch without re-allocating memory.
 			batchSchema = batchSchema[:0]
+			batchDoc = batchDoc[:0]
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -194,4 +195,42 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 		return fmt.Errorf("no matching DDL of `%s`.`%s` found in file %s", ts.SchemaName, ts.TableName, ts.Filepath)
 	}
 	return nil
+}
+
+func (ts *TableSchema) GetMeiliSearchDoc(
+	defaultDoc map[string]interface{},
+) (
+	meilisearchDoc map[string]interface{},
+	err error,
+) {
+	meilisearchDoc = make(map[string]interface{})
+	idPrefix := ""
+	// convert TableSchema to doc and merge with default Doc fields
+	for k, v := range defaultDoc {
+		if k == "id_prefix" {
+			idPrefix = v.(string)
+			continue
+		}
+		if _, ok := meilisearchDoc[k]; !ok {
+			meilisearchDoc[k] = v
+		}
+	}
+	if idPrefix == "" {
+		return nil, fmt.Errorf("id_prefix is empty")
+	}
+	meilisearchDoc["id"] = SanitizeString(fmt.Sprintf("%s_%s", idPrefix, ts.Filepath))
+	meilisearchDoc["schema_name"] = ts.SchemaName
+	meilisearchDoc["table_name"] = ts.TableName
+	meilisearchDoc["create_statement"] = ts.CreateStatement
+	meilisearchDoc["parse_warn"] = ts.ParseWarn
+	meilisearchDoc["parse_error"] = ts.ParseErr
+	meilisearchDoc["decompress_error"] = ts.DecompressErr
+	return meilisearchDoc, nil
+}
+
+func SanitizeString(input string) string {
+	// Replace invalid characters with an underscore
+	re := regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	sanitized := re.ReplaceAllString(input, "-")
+	return sanitized
 }
