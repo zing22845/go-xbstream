@@ -20,34 +20,6 @@ graph TD
 ```
 
 ```mermaid
-graph TD
-    subgraph TableSchema
-        StreamOut --> |原始数据| DecryptProcess
-        DecryptProcess --> |解密数据| DecompressProcess
-        DecompressProcess --> |解压数据| ParseIn
-        ParseIn --> |待解析数据| Parser
-        Parser --> |解析结果| ParseOut
-        
-        StreamIn --> |写入原始数据| StreamOut
-    end
-
-    subgraph 解密方法
-        DecryptProcess --> |xbcrypt| XBCrypt[XBCrypt解密]
-        DecryptProcess --> |无| NoDecrypt[无需解密]
-    end
-
-    subgraph 解压方法
-        DecompressProcess --> |qp| QPress[QPress解压]
-        DecompressProcess --> |无| NoDecompress[无需解压]
-    end
-
-    XBCrypt --> QPress
-    XBCrypt --> NoDecompress
-    NoDecrypt --> QPress
-    NoDecrypt --> NoDecompress
-```
-
-```mermaid
 sequenceDiagram
     participant SI as StreamIn
     participant SO as StreamOut
