@@ -128,8 +128,10 @@ func readChunks(
 			}
 			xr := xbstream.NewReader(rs)
 			subChunkIndex := &ChunkIndex{
-				Filepath:      ci.Filepath,
-				StartPosition: ci.StartPosition + totalChunksSize,
+				Filepath:         ci.Filepath,
+				StartPosition:    ci.StartPosition + totalChunksSize,
+				EncryptKey:       ci.EncryptKey,
+				ExtractLimitSize: ci.ExtractLimitSize,
 			}
 			defer func() {
 				rsp.Put(rs)

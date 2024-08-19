@@ -96,6 +96,12 @@ func main() {
 		}
 	}
 
+	// set decrypt key
+	encryptKey := ""
+	if len(os.Args) > 3 {
+		encryptKey = os.Args[3]
+	}
+
 	files := make(map[string]interface{})
 	failedChunks := make([]*index.ChunkIndex, 0)
 
@@ -197,6 +203,7 @@ func main() {
 				Filepath:      fPath,
 				StartPosition: offset - payLen - int64(chunk.HeaderSize),
 				EndPosition:   offset,
+				EncryptKey:    []byte(encryptKey),
 			}
 			failedChunks = append(failedChunks, ci)
 			continue

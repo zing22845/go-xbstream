@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 750">
+  <style>
+    text { font-family: Arial, sans-serif; font-size: 14px; }
+    .title { font-size: 18px; font-weight: bold; }
+    .subtitle { font-size: 12px; font-style: italic; }
+    rect { fill: #f0f0f0; stroke: #000; stroke-width: 1; }
+  </style>
+
+  <!-- Main container -->
+  <rect x="50" y="10" width="400" height="700" fill="#fff" stroke="#000" stroke-width="2"/>
+
+  <!-- Title -->
+  <text x="250" y="40" text-anchor="middle" class="title">XBStream Chunk Structure</text>
+
+  <!-- Header components -->
+  <rect x="60" y="60" width="380" height="30"/>
+  <text x="70" y="80">Magic (8 bytes)</text>
+  <text x="280" y="80" class="subtitle">XBSTCK01</text>
+  
+  <rect x="60" y="100" width="380" height="30"/>
+  <text x="70" y="120">Flags (1 byte)</text>
+  <text x="280" y="120" class="subtitle">ChunkFlag</text>
+  
+  <rect x="60" y="140" width="380" height="30"/>
+  <text x="70" y="160">Type (1 byte)</text>
+  <text x="280" y="160" class="subtitle">ChunkType (P/E/Unknown)</text>
+
+  <rect x="60" y="180" width="380" height="30"/>
+  <text x="70" y="200">Path Length (4 bytes)</text>
+  <text x="280" y="200" class="subtitle">uint32</text>
+  
+  <rect x="60" y="220" width="380" height="30"/>
+  <text x="70" y="240">Path (variable, max 512 bytes)</text>
+  <text x="280" y="240" class="subtitle">[]uint8</text>
+  
+  <rect x="60" y="260" width="380" height="30"/>
+  <text x="70" y="280">Payload Length (8 bytes)</text>
+  <text x="280" y="280" class="subtitle">uint64</text>
+  
+  <rect x="60" y="300" width="380" height="30"/>
+  <text x="70" y="320">Payload Offset (8 bytes)</text>
+  <text x="280" y="320" class="subtitle">uint64</text>
+  
+  <rect x="60" y="340" width="380" height="30"/>
+  <text x="70" y="360">Checksum (4 bytes)</text>
+  <text x="280" y="360" class="subtitle">uint32</text>
+  
+  <!-- Payload section -->
+  <rect x="60" y="390" width="380" height="60"/>
+  <text x="70" y="420">Payload (variable size)</text>
+  <text x="70" y="440" class="subtitle">File content or EOF marker</text>
+  
+  <!-- Constants -->
+  <text x="60" y="520" class="subtitle">Constants:</text>
+  <text x="60" y="540" class="subtitle">MinimumChunkSize = 10 MB</text>
+  <text x="60" y="560" class="subtitle">MaxPathLength = 512 bytes</text>
+  <text x="60" y="580" class="subtitle">ChunkHeaderFixSize = 14 bytes</text>
+  <text x="60" y="600" class="subtitle">ChunkPayFixSize = 20 bytes</text>
+  
+  <!-- Footer -->
+  <text x="250" y="650" text-anchor="middle" class="subtitle">Total size: Header (variable) + Payload (variable)</text>
+</svg>

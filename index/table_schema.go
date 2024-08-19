@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	frmutils "github.com/zing22845/go-frm-parser/frm/utils"
 	"github.com/zing22845/go-ibd2schema"
 	"github.com/zing22845/go-qpress"
+	"github.com/zing22845/go-xbstream/xbcrypt"
 	"gorm.io/gorm"
 )
 
@@ -24,12 +26,20 @@ type TableSchema struct {
 	CreateStatement      string         `gorm:"column:create_statement;type:text"`
 	ParseWarn            string         `gorm:"column:parse_warn;type:text"`
 	ParseErr             string         `gorm:"column:parse_err;type:text"`
+	DecryptErr           string         `gorm:"column:decrypt_err;type:text"`
 	DecompressErr        string         `gorm:"column:decompress_err;type:text"`
-	DecompressedFileType string         `gorm:"-"`
+	ExtractLimitSize     int64          `gorm:"-"`
+	DecryptMethod        string         `gorm:"-"`
+	DecryptedFileType    string         `gorm:"-"`
+	DecryptedFilepath    string         `gorm:"-"`
 	DecompressMethod     string         `gorm:"-"`
+	DecompressedFileType string         `gorm:"-"`
 	DecompressedFilepath string         `gorm:"-"`
 	StreamIn             *io.PipeWriter `gorm:"-"`
 	StreamOut            *io.PipeReader `gorm:"-"`
+	EncryptKey           []byte         `gorm:"-"`
+	MidPipeIn            *io.PipeWriter `gorm:"-"`
+	MidPipeOut           *io.PipeReader `gorm:"-"`
 	ParseIn              *io.PipeWriter `gorm:"-"`
 	ParseOut             *io.PipeReader `gorm:"-"`
 	ParseDone            chan struct{}  `gorm:"-"`
@@ -37,12 +47,20 @@ type TableSchema struct {
 }
 
 func NewTableSchema(
-	filepath,
+	filepath string,
+	limitSize int64,
+	encryptKey []byte,
+	decryptedFileType,
+	decryptMethod,
 	decompressedFileType,
 	decompressMethod string,
 ) (ts *TableSchema, err error) {
 	ts = &TableSchema{
 		Filepath:             filepath,
+		ExtractLimitSize:     limitSize,
+		EncryptKey:           encryptKey,
+		DecryptedFileType:    decryptedFileType,
+		DecryptMethod:        decryptMethod,
 		DecompressedFileType: decompressedFileType,
 		DecompressMethod:     decompressMethod,
 	}
@@ -53,6 +71,7 @@ func NewTableSchema(
 	return ts, nil
 }
 
+// prepareStream prepares the stream for parsing
 func (ts *TableSchema) prepareStream() (err error) {
 	ts.SchemaName, ts.TableName = filepath.Split(ts.Filepath)
 	ts.SchemaName = strings.TrimSuffix(ts.SchemaName, "/")
@@ -61,16 +80,40 @@ func (ts *TableSchema) prepareStream() (err error) {
 		return err
 	}
 	ts.StreamOut, ts.StreamIn = io.Pipe()
-	switch ts.DecompressMethod {
-	case "qp":
+
+	switch ts.DecryptMethod {
+	case "xbcrypt":
 		ts.ParseOut, ts.ParseIn = io.Pipe()
-		ts.TableName = strings.TrimSuffix(ts.TableName, ".qp")
+		ts.TableName = strings.TrimSuffix(ts.TableName, ".xbcrypt")
+		switch ts.DecompressMethod {
+		case "qp":
+			// decrypt and decompress
+			ts.MidPipeOut, ts.MidPipeIn = io.Pipe()
+			ts.TableName = strings.TrimSuffix(ts.TableName, ".qp")
+		case "":
+			// decrypt and no decompress
+			ts.MidPipeIn = ts.ParseIn
+			ts.MidPipeOut = ts.ParseOut
+		}
 	case "":
-		ts.ParseIn = ts.StreamIn
-		ts.ParseOut = ts.StreamOut
+		ts.MidPipeIn = ts.StreamIn
+		ts.MidPipeOut = ts.StreamOut
+		switch ts.DecompressMethod {
+		case "qp":
+			// no decrypt and decompress
+			ts.ParseOut, ts.ParseIn = io.Pipe()
+			ts.TableName = strings.TrimSuffix(ts.TableName, ".qp")
+		case "":
+			// no decrypt and no decompress
+			ts.ParseIn = ts.StreamIn
+			ts.ParseOut = ts.StreamOut
+		default:
+			return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
+		}
 	default:
-		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
+		return fmt.Errorf("unsupported decrypt method %s", ts.DecryptMethod)
 	}
+
 	return nil
 }
 
@@ -98,28 +141,62 @@ func (ts *TableSchema) ParseSchema() {
 	}
 }
 
+func (ts *TableSchema) decryptStream() (err error) {
+	switch ts.DecryptMethod {
+	case "xbcrypt":
+		defer func() {
+			_ = ts.MidPipeIn.Close()
+		}()
+		decryptContext, err := xbcrypt.NewDecryptContext(
+			ts.EncryptKey, ts.StreamOut, ts.MidPipeIn, ts.ExtractLimitSize)
+		if err != nil {
+			return fmt.Errorf("failed to create decrypt context: %w", err)
+		}
+		err = decryptContext.ProcessChunks()
+		if err != nil {
+			if errors.Is(err, xbcrypt.ErrExceedExtractSize) {
+				ts.ParseWarn = fmt.Sprintf("partially decrypted to limit size  %d", ts.ExtractLimitSize)
+				// copy the rest of the stream to discard
+				_, err = io.Copy(io.Discard, ts.StreamOut)
+				if err != nil {
+					return err
+				}
+				return nil
+			}
+			return fmt.Errorf("failed to process chunks: %w", err)
+		}
+	case "":
+		// no decrypt
+		return nil
+	default:
+		return fmt.Errorf("unsupported decrypt method %s", ts.DecryptMethod)
+	}
+	return nil
+}
+
 func (ts *TableSchema) decompressStream() (err error) {
 	switch ts.DecompressMethod {
 	case "qp":
 		defer func() {
 			_ = ts.ParseIn.Close()
 		}()
-		var limitSize int64 = 5 * 1024 * 1024
 		qpressFile := &qpress.ArchiveFile{}
 		isPartial, err := qpressFile.DecompressStream(
-			ts.StreamOut, ts.ParseIn, limitSize)
+			ts.MidPipeOut, ts.ParseIn, ts.ExtractLimitSize)
 		if err != nil {
 			return err
 		}
 		if isPartial {
-			ts.ParseWarn = fmt.Sprintf("partially decompressed to limit size  %d", limitSize)
+			ts.ParseWarn = fmt.Sprintf("partially decompressed to limit size  %d", ts.ExtractLimitSize)
 			// copy the rest of the stream to discard
-			_, err = io.Copy(io.Discard, ts.StreamOut)
+			_, err = io.Copy(io.Discard, ts.MidPipeOut)
 			if err != nil {
 				return err
 			}
 		}
 	case "":
+		// no decompression
+		return nil
 	default:
 		return fmt.Errorf("unsupported decompress method %s", ts.DecompressMethod)
 	}
@@ -132,8 +209,14 @@ func (ts *TableSchema) parseFrmFile() (err error) {
 		_, _ = io.Copy(io.Discard, ts.ParseOut)
 	}()
 	go func() {
-		// file is qp compressed
-		err := ts.decompressStream()
+		// decrypt the stream
+		err := ts.decryptStream()
+		if err != nil {
+			ts.DecryptErr = err.Error()
+			return
+		}
+		// decompress the stream
+		err = ts.decompressStream()
 		if err != nil {
 			ts.DecompressErr = err.Error()
 			return
@@ -154,8 +237,14 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 		_, _ = io.Copy(io.Discard, ts.ParseOut)
 	}()
 	go func() {
-		// file is qp compressed
-		err := ts.decompressStream()
+		// decrypt the stream
+		err := ts.decryptStream()
+		if err != nil {
+			ts.DecryptErr = err.Error()
+			return
+		}
+		// decompress the stream
+		err = ts.decompressStream()
 		if err != nil {
 			ts.DecompressErr = err.Error()
 			return

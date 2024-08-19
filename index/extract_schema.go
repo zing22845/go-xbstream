@@ -17,6 +17,10 @@ func ExtractSchemaByPayload(
 	if ci.PayOffset == 0 {
 		tableSchema, err = NewTableSchema(
 			ci.Filepath,
+			ci.ExtractLimitSize,
+			ci.EncryptKey,
+			ci.DecryptedFileType,
+			ci.DecryptMethod,
 			ci.DecompressedFileType,
 			ci.DecompressMethod,
 		)

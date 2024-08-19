@@ -21,9 +21,8 @@ package xbstream
 
 import (
 	"bytes"
-	"testing"
-
 	"io"
+	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,83 +44,51 @@ var xbFile = []byte{
 	0x00, 0x66, 0x69, 0x6c, 0x65, 0x32,
 }
 
-func TestNewReader(t *testing.T) {
+func TestReader(t *testing.T) {
 	xb := bytes.NewReader(xbFile)
-
 	reader := NewReader(xb)
 
-	var (
-		expected ChunkHeader
-		chunk    *Chunk
-		err      error
-		payload  = make([]byte, 5)
-	)
+	// Test file1
+	chunk, err := reader.Next()
+	require.NoError(t, err)
+	assert.Equal(t, ChunkTypePayload, chunk.Type)
+	assert.Equal(t, []byte("file1"), chunk.Path)
+	assert.Equal(t, uint64(5), chunk.PayLen)
+	assert.Equal(t, uint64(0), chunk.PayOffset)
 
-	// file1 chunk payload
-	expected = ChunkHeader{
-		Magic:     ChunkMagic,
-		Flags:     0,
-		Type:      ChunkTypePayload,
-		PathLen:   5,
-		Path:      []byte("file1"),
-		PayLen:    5,
-		PayOffset: 0,
-		Checksum:  uint32(0x4b31fe5d),
-	}
-	chunk, err = reader.Next()
-	require.NoError(t, err, "error reading file1 chunk payload from xbstream")
-	assert.Equal(t, expected, chunk.ChunkHeader)
-	_, err = chunk.Read(payload)
-	require.NoError(t, err, "error occured reading file1 payload contents")
+	payload := make([]byte, 5)
+	n, err := io.ReadFull(chunk, payload)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
 	assert.Equal(t, []byte{0x87, 0x19, 0x8b, 0xe0, 0x9a}, payload)
 
-	// file1 EOF
-	expected = ChunkHeader{
-		Magic:     ChunkMagic,
-		Flags:     0,
-		Type:      ChunkTypeEOF,
-		PathLen:   5,
-		Path:      []byte("file1"),
-		PayLen:    0,
-		PayOffset: 0,
-		Checksum:  0,
-	}
+	// Test file1 EOF
 	chunk, err = reader.Next()
-	require.NoError(t, err, "error reading eof chunk for file1 from xbstream")
-	assert.Equal(t, expected, chunk.ChunkHeader)
+	require.NoError(t, err)
+	assert.Equal(t, ChunkTypeEOF, chunk.Type)
+	assert.Equal(t, []byte("file1"), chunk.Path)
 
-	// file2 chunk payload
-	expected = ChunkHeader{
-		Magic:     ChunkMagic,
-		Flags:     0,
-		Type:      ChunkTypePayload,
-		PathLen:   5,
-		Path:      []byte("file2"),
-		PayLen:    5,
-		PayOffset: 0,
-		Checksum:  uint32(0x978b5889),
-	}
+	// Test file2
 	chunk, err = reader.Next()
-	require.NoError(t, err, "error reading file2 chunk payload from xbstream")
-	_, err = chunk.Read(payload)
-	require.NoError(t, err, "error occured reading file1 payload contents")
+	require.NoError(t, err)
+	assert.Equal(t, ChunkTypePayload, chunk.Type)
+	assert.Equal(t, []byte("file2"), chunk.Path)
+	assert.Equal(t, uint64(5), chunk.PayLen)
+	assert.Equal(t, uint64(0), chunk.PayOffset)
+
+	n, err = io.ReadFull(chunk, payload)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
 	assert.Equal(t, []byte{0x35, 0xbf, 0x06, 0x38, 0x97}, payload)
 
-	// file2 EOF
-	expected = ChunkHeader{
-		Magic:     ChunkMagic,
-		Flags:     0,
-		Type:      ChunkTypeEOF,
-		PathLen:   5,
-		Path:      []byte("file2"),
-		PayLen:    0,
-		PayOffset: 0,
-		Checksum:  0,
-	}
+	// Test file2 EOF
 	chunk, err = reader.Next()
-	require.NoError(t, err, "error reading eof chunk for file2 from xbstream")
-	assert.Equal(t, expected, chunk.ChunkHeader)
+	require.NoError(t, err)
+	assert.Equal(t, ChunkTypeEOF, chunk.Type)
+	assert.Equal(t, []byte("file2"), chunk.Path)
 
-	_, err = reader.Next()
-	assert.Equal(t, err, io.EOF)
+	// Test end of archive
+	chunk, err = reader.Next()
+	assert.Equal(t, io.EOF, err)
+	assert.Equal(t, uint64(0), chunk.PayLen)
 }

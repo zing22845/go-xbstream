@@ -88,6 +88,8 @@ type IndexStream struct {
 	IsRemoveLocalIndexFile            bool
 	MeilisearchIndex                  *meilisearch.Index
 	MeilisearchDefaultDoc             map[string]interface{}
+	EncryptKey                        []byte
+	ExtractLimitSize                  int64
 	*MySQLServer
 }
 
@@ -97,9 +99,14 @@ func NewIndexStream(
 	baseDIR string,
 	mysqlVersion string,
 	isRemoveLocalIndexFile bool,
+	encryptKey []byte,
+	extractLimitSize int64,
 	meilisearchIndex *meilisearch.Index,
 	meilisearchDefaultDoc map[string]interface{},
 ) *IndexStream {
+	if extractLimitSize < 0 {
+		extractLimitSize = 0
+	}
 	i := &IndexStream{
 		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
 		IndexFilename:        indexFilename,
@@ -125,8 +132,10 @@ func NewIndexStream(
 			),
 		),
 		IsRemoveLocalIndexFile: isRemoveLocalIndexFile,
+		EncryptKey:             encryptKey,
 		MeilisearchIndex:       meilisearchIndex,
 		MeilisearchDefaultDoc:  meilisearchDefaultDoc,
+		ExtractLimitSize:       extractLimitSize,
 	}
 	i.prepareParseSchema()
 	i.Offset.Store(0)
@@ -138,12 +147,14 @@ func (i *IndexStream) prepareParseSchema() {
 	if REGMySQL5.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".frm"
 		i.IsParseTableSchema = true
-		i.DefaultLikePaths = []string{`%/%%.frm`, `%/%%.frm.qp`}
+		i.DefaultLikePaths = []string{
+			`%/%%.frm`, `%/%%.frm.qp`, `%/%%.frm.xbcrypt`, `%/%%.frm.qp.xbcrypt`}
 		i.DefaultNotLikePaths = []string{`mysql/%`, `performance_schema/%`, `sys/%`, `information_schema/%`}
 	} else if REGMySQL8.MatchString(i.MySQLVersion) {
 		i.ParseTargetFileType = ".ibd"
 		i.IsParseTableSchema = true
-		i.DefaultLikePaths = []string{`%/%%.ibd`, `%/%%.ibd.qp`}
+		i.DefaultLikePaths = []string{
+			`%/%%.ibd`, `%/%%.ibd.qp`, `%/%%.ibd.xbcrypt`, `%/%%.ibd.qp.xbcrypt`}
 		i.DefaultNotLikePaths = []string{`mysql/%`, `performance_schema/%`, `sys/%`, `information_schema/%`}
 	}
 	i.RegSkipPattern = regexp.MustCompile(`^(mysql|information_schema|performance_schema|sys)$`)
@@ -315,10 +326,12 @@ func (i *IndexStream) IndexHeader(header *xbstream.ChunkHeader, ci *ChunkIndex) 
 		// new file
 		i.ChunkIndexChan <- ci
 		ci = &ChunkIndex{
-			Filepath:      filepath,
-			StartPosition: ci.EndPosition,
-			EndPosition:   i.Offset.Load(),
-			PayOffset:     header.PayOffset,
+			Filepath:         filepath,
+			StartPosition:    ci.EndPosition,
+			EndPosition:      i.Offset.Load(),
+			PayOffset:        header.PayOffset,
+			EncryptKey:       ci.EncryptKey,
+			ExtractLimitSize: ci.ExtractLimitSize,
 		}
 	}
 	ci.DecodeFilepath()
@@ -365,8 +378,7 @@ func (i *IndexStream) DecodeChunk(xr *xbstream.Reader, ci *ChunkIndex) *ChunkInd
 	return ci
 }
 
-// StreamIndexFile 方法用于将索引文件和索引文件的offset写入到xbstream中
-
+// StreamIndexFile write index file and index file offset to xbstream
 func (i *IndexStream) StreamIndexFile(w io.WriteCloser) {
 	i.IndexFileOffsetStart = i.Offset.Load()
 	i.IndexFileOffsetEnd = i.IndexFileOffsetStart
@@ -688,9 +700,11 @@ func (i *IndexStream) ExtractIndexFile(rsp *readseekerpool.ReadSeekerPool, targe
 	}
 	rsp.Put(rs)
 	ci := &ChunkIndex{
-		Filepath:      i.IndexFileOffsetFilename,
-		StartPosition: offset,
-		EndPosition:   offset + i.IndexFileOffsetFileChunkTotalSize,
+		Filepath:         i.IndexFileOffsetFilename,
+		StartPosition:    offset,
+		EndPosition:      offset + i.IndexFileOffsetFileChunkTotalSize,
+		EncryptKey:       i.EncryptKey,
+		ExtractLimitSize: i.ExtractLimitSize,
 	}
 	cis <- ci
 	close(cis)
@@ -716,9 +730,11 @@ func (i *IndexStream) ExtractIndexFile(rsp *readseekerpool.ReadSeekerPool, targe
 	}
 	// extract index file
 	ci = &ChunkIndex{
-		Filepath:      i.IndexFilename,
-		StartPosition: i.IndexFileOffsetStart,
-		EndPosition:   offset,
+		Filepath:         i.IndexFilename,
+		StartPosition:    i.IndexFileOffsetStart,
+		EncryptKey:       i.EncryptKey,
+		EndPosition:      offset,
+		ExtractLimitSize: i.ExtractLimitSize,
 	}
 	cis = make(chan *ChunkIndex, 1)
 	cis <- ci
