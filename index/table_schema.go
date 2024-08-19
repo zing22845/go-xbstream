@@ -215,6 +215,8 @@ func (ts *TableSchema) parseFrmFile() (err error) {
 			ts.DecryptErr = err.Error()
 			return
 		}
+	}()
+	go func() {
 		// decompress the stream
 		err = ts.decompressStream()
 		if err != nil {
@@ -243,6 +245,8 @@ func (ts *TableSchema) parseIbdFile() (err error) {
 			ts.DecryptErr = err.Error()
 			return
 		}
+	}()
+	go func() {
 		// decompress the stream
 		err = ts.decompressStream()
 		if err != nil {
