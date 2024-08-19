@@ -521,6 +521,7 @@ func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 	ci := &ChunkIndex{}
 	for {
 		ci = i.DecodeChunk(xr, ci)
+		ci.EncryptKey = i.EncryptKey
 		if i.Err != nil || i.IsIndexDone {
 			close(i.ChunkIndexChan)
 			<-i.IndexTableDone
