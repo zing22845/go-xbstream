@@ -1,6 +1,7 @@
 package index
 
 import (
+	"crypto/aes"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +86,16 @@ func (ts *TableSchema) prepareStream() (err error) {
 	case "xbcrypt":
 		ts.ParseOut, ts.ParseIn = io.Pipe()
 		ts.TableName = strings.TrimSuffix(ts.TableName, ".xbcrypt")
+
+		// check if the encrypt key is valid
+		keyLen := len(ts.EncryptKey)
+		switch keyLen {
+		default:
+			return aes.KeySizeError(keyLen)
+		case 16, 24, 32:
+			// do nothing
+		}
+
 		switch ts.DecompressMethod {
 		case "qp":
 			// decrypt and decompress
@@ -145,6 +156,15 @@ func (ts *TableSchema) decryptStream() (err error) {
 	switch ts.DecryptMethod {
 	case "xbcrypt":
 		defer func() {
+			if err != nil {
+				if errors.Is(err, xbcrypt.ErrExceedExtractSize) {
+					ts.ParseWarn = fmt.Sprintf("partially decrypted to limit size  %d", ts.ExtractLimitSize)
+					// copy the rest of the stream to discard
+				} else {
+					err = fmt.Errorf("failed to process chunks: %w", err)
+				}
+				_, _ = io.Copy(io.Discard, ts.StreamOut)
+			}
 			_ = ts.MidPipeIn.Close()
 		}()
 		decryptContext, err := xbcrypt.NewDecryptContext(
@@ -153,46 +173,33 @@ func (ts *TableSchema) decryptStream() (err error) {
 			return fmt.Errorf("failed to create decrypt context: %w", err)
 		}
 		err = decryptContext.ProcessChunks()
-		if err != nil {
-			if errors.Is(err, xbcrypt.ErrExceedExtractSize) {
-				ts.ParseWarn = fmt.Sprintf("partially decrypted to limit size  %d", ts.ExtractLimitSize)
-				// copy the rest of the stream to discard
-				_, err = io.Copy(io.Discard, ts.StreamOut)
-				if err != nil {
-					return err
-				}
-				return nil
-			}
-			return fmt.Errorf("failed to process chunks: %w", err)
-		}
+		return err
 	case "":
 		// no decrypt
 		return nil
 	default:
 		return fmt.Errorf("unsupported decrypt method %s", ts.DecryptMethod)
 	}
-	return nil
 }
 
 func (ts *TableSchema) decompressStream() (err error) {
 	switch ts.DecompressMethod {
 	case "qp":
+		var isPartial bool
 		defer func() {
+			if err != nil {
+				_, _ = io.Copy(io.Discard, ts.StreamOut)
+			} else if isPartial {
+				ts.ParseWarn = fmt.Sprintf("partially decompressed to limit size  %d", ts.ExtractLimitSize)
+				_, err = io.Copy(io.Discard, ts.MidPipeOut)
+			}
 			_ = ts.ParseIn.Close()
 		}()
 		qpressFile := &qpress.ArchiveFile{}
-		isPartial, err := qpressFile.DecompressStream(
+		isPartial, err = qpressFile.DecompressStream(
 			ts.MidPipeOut, ts.ParseIn, ts.ExtractLimitSize)
 		if err != nil {
 			return err
-		}
-		if isPartial {
-			ts.ParseWarn = fmt.Sprintf("partially decompressed to limit size  %d", ts.ExtractLimitSize)
-			// copy the rest of the stream to discard
-			_, err = io.Copy(io.Discard, ts.MidPipeOut)
-			if err != nil {
-				return err
-			}
 		}
 	case "":
 		// no decompression

@@ -656,6 +656,7 @@ func (i *IndexStream) ExtractSchemas(rsp *readseekerpool.ReadSeekerPool, targetD
 			i.Err = err
 			return
 		}
+		ci.EncryptKey = i.EncryptKey
 		wg.Add(1)
 		go func(ci *ChunkIndex, rs io.ReadSeeker) {
 			defer wg.Done()
