@@ -1,9 +1,13 @@
 module github.com/zing22845/go-xbstream
 
+go 1.22.6
+
 require (
 	github.com/akamensky/argparse v0.0.0-20190829110830-5293d9863374
 	github.com/glebarez/sqlite v1.9.0
+	github.com/go-mysql-org/go-mysql v1.9.0
 	github.com/meilisearch/meilisearch-go v0.27.0
+	github.com/pingcap/tidb/pkg/parser v0.0.0-20240415074806-224ae1547850
 	github.com/pkg/errors v0.9.1
 	github.com/sirupsen/logrus v1.9.3
 	github.com/skmcgrail/go-xbstream v1.1.0
@@ -18,6 +22,7 @@ require (
 
 require (
 	github.com/Hiroko103/go-quicklz v0.0.0-20190115215310-59904abc50d0 // indirect
+	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/alitto/pond v1.7.1 // indirect
 	github.com/andybalholm/brotli v1.0.4 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.27.2 // indirect
@@ -31,6 +36,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.17.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.55.1 // indirect
 	github.com/aws/smithy-go v1.20.2 // indirect
+	github.com/cznic/mathutil v0.0.0-20181122101859-297441e03548 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
@@ -39,14 +45,16 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
-	github.com/klauspost/compress v1.15.6 // indirect
+	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/pingcap/errors v0.11.5-0.20240311024730-e056997136bb // indirect
-	github.com/pingcap/log v1.1.0 // indirect
-	github.com/pingcap/tidb/pkg/parser v0.0.0-20240415074806-224ae1547850 // indirect
+	github.com/pingcap/failpoint v0.0.0-20220801062533-2eaa32854a6c // indirect
+	github.com/pingcap/log v1.1.1-0.20230317032135-a0d097d16e22 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/siddontang/go v0.0.0-20180604090527-bdc77568d726 // indirect
+	github.com/siddontang/go-log v0.0.0-20180807004314-8d05993dda07 // indirect
 	github.com/tidwall/gjson v1.17.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
@@ -65,5 +73,3 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
-
-go 1.21.5

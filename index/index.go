@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/meilisearch/meilisearch-go"
 	log "github.com/sirupsen/logrus"
 	gormv2logrus "github.com/thomas-tacquet/gormv2-logrus"
@@ -90,6 +91,7 @@ type IndexStream struct {
 	MeilisearchDefaultDoc             map[string]interface{}
 	EncryptKey                        []byte
 	ExtractLimitSize                  int64
+	Conn                              *client.Conn
 	*MySQLServer
 }
 
@@ -101,6 +103,7 @@ func NewIndexStream(
 	isRemoveLocalIndexFile bool,
 	encryptKey []byte,
 	extractLimitSize int64,
+	conn *client.Conn,
 	meilisearchIndex *meilisearch.Index,
 	meilisearchDefaultDoc map[string]interface{},
 ) *IndexStream {
@@ -136,6 +139,7 @@ func NewIndexStream(
 		MeilisearchIndex:       meilisearchIndex,
 		MeilisearchDefaultDoc:  meilisearchDefaultDoc,
 		ExtractLimitSize:       extractLimitSize,
+		Conn:                   conn,
 	}
 	i.prepareParseSchema()
 	i.Offset.Store(0)
@@ -224,7 +228,7 @@ func (i *IndexStream) ParseSchemaFile() {
 		if tableSchema.Filepath == "" {
 			continue
 		}
-		tableSchema.ParseSchema()
+		tableSchema.ParseSchema(i.Conn)
 		if tableSchema.IsHidden {
 			continue
 		}

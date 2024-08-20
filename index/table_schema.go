@@ -10,6 +10,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/go-mysql-org/go-mysql/client"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver" // import test_driver or sqlparser will panic
+	errs "github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/zing22845/go-frm-parser/frm"
 	frmutils "github.com/zing22845/go-frm-parser/frm/utils"
@@ -128,7 +134,7 @@ func (ts *TableSchema) prepareStream() (err error) {
 	return nil
 }
 
-func (ts *TableSchema) ParseSchema() {
+func (ts *TableSchema) ParseSchema(conn *client.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
 			stackBuf := make([]byte, 102400)
@@ -149,7 +155,83 @@ func (ts *TableSchema) ParseSchema() {
 		}
 	default:
 		ts.ParseErr = fmt.Sprintf("unsupported file type %s", ts.DecompressedFileType)
+		return
 	}
+	// verify the create statement
+	if conn != nil && ts.CreateStatement != "" {
+		err := ts.verifyCreateStatement(conn)
+		if err != nil {
+			ts.ParseErr = err.Error()
+		}
+	}
+}
+
+func normalizeSQL(sql string) (string, error) {
+	p := parser.New()
+
+	stmtNodes, _, err := p.Parse(sql, "", "")
+	if err != nil {
+		return "", fmt.Errorf("parsing SQL: %w", err)
+	}
+
+	if len(stmtNodes) != 1 {
+		return "", fmt.Errorf("expected 1 statement, got %d", len(stmtNodes))
+	}
+
+	createStmt, ok := stmtNodes[0].(*ast.CreateTableStmt)
+	if !ok {
+		return "", fmt.Errorf("expected CreateTableStmt, got %T", stmtNodes[0])
+	}
+
+	// Remove AUTO_INCREMENT
+	for i, opt := range createStmt.Options {
+		if opt.Tp == ast.TableOptionAutoIncrement {
+			createStmt.Options = append(createStmt.Options[:i], createStmt.Options[i+1:]...)
+			break
+		}
+	}
+
+	// Regenerate SQL
+	var sb strings.Builder
+	ctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	if err := createStmt.Restore(ctx); err != nil {
+		return "", fmt.Errorf("restoring SQL: %w", err)
+	}
+
+	return sb.String(), nil
+}
+
+func (ts *TableSchema) verifyCreateStatement(conn *client.Conn) error {
+	// show create table statement by conn
+	sql := fmt.Sprintf("show create table `%s`.`%s`", ts.SchemaName, ts.TableName)
+	result, err := conn.Execute(sql)
+	if err != nil {
+		return err
+	}
+	if result.RowNumber() == 0 {
+		return fmt.Errorf("no create statement found for table `%s`.`%s`", ts.SchemaName, ts.TableName)
+	}
+	for ri := range result.Values {
+		expect, err := result.GetString(ri, 1)
+		if err != nil {
+			return errs.Wrap(err, "failed to get create statement")
+		}
+		actual, err := normalizeSQL(ts.CreateStatement)
+		if err != nil {
+			return errs.Wrap(err, "failed to normalize create statement from file")
+		}
+		expect, err = normalizeSQL(expect)
+		if err != nil {
+			return errs.Wrap(err, "failed to normalize create statement from db")
+		}
+		if expect != actual {
+			err = fmt.Errorf(
+				"create statement mismatch for table `%s`.`%s`, expected: %s, actual: %s",
+				ts.SchemaName, ts.TableName, expect, actual)
+			return err
+		}
+	}
+	return nil
 }
 
 func (ts *TableSchema) decryptStream() (err error) {
