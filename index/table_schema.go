@@ -171,7 +171,12 @@ func normalizeSQL(sql string) (string, error) {
 
 	stmtNodes, _, err := p.Parse(sql, "", "")
 	if err != nil {
-		return "", fmt.Errorf("parsing SQL: %w", err)
+		// tidb sqlparser not support the sql
+		// fallback to remove auto_increment by string replace
+		sql = strings.Trim(sql, ";\n")
+		re := regexp.MustCompile(`\sAUTO_INCREMENT=\d+\s`)
+		sql = re.ReplaceAllString(sql, " ")
+		return sql, nil
 	}
 
 	if len(stmtNodes) != 1 {
