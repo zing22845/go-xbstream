@@ -180,13 +180,14 @@ func (dc *DecryptContext) decryptData() (err error) {
 	}
 
 	// Create a CTR mode decrypter using the existing block cipher
-	mode := cipher.NewCTR(dc.block, dc.currentChunk.IV)
+	stream := cipher.NewCTR(dc.block, dc.currentChunk.IV)
 
 	// Decrypt the data and write it to the MultiWriter
-	decryptedWriter := cipher.StreamWriter{S: mode, W: w}
+	dataWriter := cipher.StreamWriter{S: stream, W: w}
+	defer dataWriter.Close()
 
 	// Use io.CopyN to read and decrypt the data
-	copiedBytes, err := io.CopyN(decryptedWriter, teeReader, int64(dc.currentChunk.PayloadSize))
+	copiedBytes, err := io.CopyN(dataWriter, teeReader, int64(dc.currentChunk.PayloadSize))
 	if err != nil && err != io.EOF {
 		return errors.Wrap(err, ErrReadEncryptedData.Error())
 	}
@@ -199,8 +200,9 @@ func (dc *DecryptContext) decryptData() (err error) {
 	if dc.currentChunk.HashAppended {
 		// Decrypt the hash
 		dc.currentChunk.Hash = bytes.NewBuffer(nil)
-		decryptedWriter = cipher.StreamWriter{S: mode, W: dc.currentChunk.Hash}
-		hashBytes, err := io.CopyN(decryptedWriter, teeReader, int64(XBCryptHashLen))
+		hashWriter := cipher.StreamWriter{S: stream, W: dc.currentChunk.Hash}
+		defer hashWriter.Close()
+		hashBytes, err := io.CopyN(hashWriter, teeReader, int64(XBCryptHashLen))
 		if err != nil {
 			return errors.Wrap(err, "failed to read appended hash")
 		}
