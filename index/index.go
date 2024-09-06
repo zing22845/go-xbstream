@@ -85,7 +85,7 @@ type IndexStream struct {
 	OpenFilesCatch                    map[string]*os.File
 	RegSkipPattern                    *regexp.Regexp
 	Err                               error
-	GormLogger                        *gormv2logrus.Gormlog
+	GormLogger                        logger.Interface
 	IsRemoveLocalIndexFile            bool
 	MeilisearchIndex                  *meilisearch.Index
 	MeilisearchDefaultDoc             map[string]interface{}
