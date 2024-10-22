@@ -87,7 +87,7 @@ type IndexStream struct {
 	Err                               error
 	GormLogger                        logger.Interface
 	IsRemoveLocalIndexFile            bool
-	MeilisearchIndex                  *meilisearch.Index
+	MeilisearchIndex                  meilisearch.IndexManager
 	MeilisearchDefaultDoc             map[string]interface{}
 	EncryptKey                        []byte
 	ExtractLimitSize                  int64
@@ -104,7 +104,7 @@ func NewIndexStream(
 	encryptKey []byte,
 	extractLimitSize int64,
 	conn *client.Conn,
-	meilisearchIndex *meilisearch.Index,
+	meilisearchIndex meilisearch.IndexManager,
 	meilisearchDefaultDoc map[string]interface{},
 ) *IndexStream {
 	if extractLimitSize < 0 {
