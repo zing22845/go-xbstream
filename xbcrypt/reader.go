@@ -185,6 +185,13 @@ func (dc *DecryptContext) decryptData() (err error) {
 	// Decrypt the data and write it to the MultiWriter
 	dataWriter := cipher.StreamWriter{S: stream, W: w}
 	defer dataWriter.Close()
+	defer func() {
+		if dc.extractLimitSize > 0 && dc.processedSize > dc.extractLimitSize {
+			err = errors.Wrap(ErrExceedExtractSize,
+				fmt.Sprintf("decyrpt error: %+v, exceeds decrypt limit size %d",
+					err, dc.extractLimitSize))
+		}
+	}()
 
 	// Use io.CopyN to read and decrypt the data
 	copiedBytes, err := io.CopyN(dataWriter, teeReader, int64(dc.currentChunk.PayloadSize))
@@ -222,9 +229,6 @@ func (dc *DecryptContext) decryptData() (err error) {
 	// Compare calculated checksum with the one stored in the chunk header
 	if crc32Checksum != dc.currentChunk.Checksum {
 		return fmt.Errorf("CRC32 checksum mismatch: expected %x, got %x", dc.currentChunk.Checksum, crc32Checksum)
-	}
-	if dc.extractLimitSize > 0 && dc.processedSize > dc.extractLimitSize {
-		return errors.Wrap(ErrExceedExtractSize, "exceeds extract limit size")
 	}
 	return nil
 }
