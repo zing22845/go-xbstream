@@ -14,9 +14,9 @@ func NewConnection(dbPath string) (db *gorm.DB, err error) {
 		return nil, err
 	}
 	// close sqlite sync to improve performance
-	db.Exec("PRAGMA synchronous = OFF")
-	if db.Error != nil {
-		return nil, db.Error
+	err = db.Exec("PRAGMA synchronous = OFF").Error
+	if err != nil {
+		return nil, err
 	}
 	return db, nil
 }
