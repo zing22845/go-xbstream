@@ -327,14 +327,17 @@ func (i *IndexStream) IndexHeader(header *xbstream.ChunkHeader, ci *ChunkIndex) 
 		ci.EndPosition = i.Offset.Load()
 		ci.PayOffset = header.PayOffset
 	} else {
+		// send last exist chunk index to channel
+		if ci.EndPosition != 0 {
+			i.ChunkIndexChan <- ci
+		}
 		// new file
-		i.ChunkIndexChan <- ci
 		ci = &ChunkIndex{
 			Filepath:         filepath,
 			StartPosition:    ci.EndPosition,
 			EndPosition:      i.Offset.Load(),
 			PayOffset:        header.PayOffset,
-			EncryptKey:       ci.EncryptKey,
+			EncryptKey:       i.EncryptKey,
 			ExtractLimitSize: ci.ExtractLimitSize,
 		}
 	}
@@ -525,7 +528,6 @@ func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 	ci := &ChunkIndex{}
 	for {
 		ci = i.DecodeChunk(xr, ci)
-		ci.EncryptKey = i.EncryptKey
 		if i.Err != nil || i.IsIndexDone {
 			close(i.ChunkIndexChan)
 			<-i.IndexTableDone
