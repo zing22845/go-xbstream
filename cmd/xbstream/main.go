@@ -21,6 +21,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"log"
@@ -29,7 +30,8 @@ import (
 	"sync"
 
 	"github.com/akamensky/argparse"
-	"github.com/skmcgrail/go-xbstream/xbstream"
+	"github.com/zing22845/go-xbstream/internal/version"
+	"github.com/zing22845/go-xbstream/pkg/xbstream"
 )
 
 func init() {
@@ -38,6 +40,9 @@ func init() {
 
 func main() {
 	parser := argparse.NewParser("xbstream", "Go implementation of the xbstream archive format")
+
+	// 添加版本命令
+	versionCmd := parser.NewCommand("version", "display version information")
 
 	createCmd := parser.NewCommand("create", "create xbstream archive")
 	createFile := createCmd.File("o", "output", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666, &argparse.Options{})
@@ -51,7 +56,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if createCmd.Happened() {
+	if versionCmd.Happened() {
+		fmt.Println(version.GetVersionInfo())
+		return
+	} else if createCmd.Happened() {
 		writeStream(createFile, createList)
 	} else if extractCmd.Happened() {
 		readStream(extractFile, *extractOut)

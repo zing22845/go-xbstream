@@ -3,7 +3,7 @@ package index
 import (
 	"path/filepath"
 
-	"github.com/zing22845/go-xbstream/xbstream"
+	"github.com/zing22845/go-xbstream/pkg/xbstream"
 
 	"gorm.io/gorm"
 )

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/zing22845/go-xbstream/xbstream"
+	"github.com/zing22845/go-xbstream/pkg/xbstream"
 )
 
 func ExtractSchemaByPayload(

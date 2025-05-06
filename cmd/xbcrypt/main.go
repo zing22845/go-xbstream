@@ -6,27 +6,59 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zing22845/go-xbstream/xbcrypt"
+	"github.com/akamensky/argparse"
+	"github.com/zing22845/go-xbstream/internal/version"
+	"github.com/zing22845/go-xbstream/pkg/xbcrypt"
 )
 
-// test xbcrypt
 func main() {
+	parser := argparse.NewParser("xbcrypt", "Encryption/decryption utility for xbstream files")
 
-	if len(os.Args) < 3 {
-		fmt.Println("usage: test_decrypt [key] [filepath]")
+	// 添加版本命令
+	versionCmd := parser.NewCommand("version", "display version information")
+
+	// 解密命令
+	decryptCmd := parser.NewCommand("decrypt", "decrypt a file")
+	decryptKey := decryptCmd.String("k", "key", &argparse.Options{
+		Required: true,
+		Help:     "Decryption key",
+	})
+	decryptFile := decryptCmd.String("i", "input", &argparse.Options{
+		Required: true,
+		Help:     "Input file path (must end with .xbcrypt)",
+	})
+	decryptOutput := decryptCmd.String("o", "output", &argparse.Options{
+		Help: "Output file path (defaults to input without .xbcrypt)",
+	})
+
+	// 解析参数
+	if err := parser.Parse(os.Args); err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	key := []byte(os.Args[1])
+	// 处理命令
+	if versionCmd.Happened() {
+		fmt.Println(version.GetVersionInfo())
+		return
+	} else if decryptCmd.Happened() {
+		decrypt(*decryptKey, *decryptFile, *decryptOutput)
+	} else {
+		fmt.Println("No command specified. Use --help for usage information.")
+	}
+}
 
-	filePath := os.Args[2]
-	destFilePath := ""
+// 执行解密操作
+func decrypt(key, filePath, destFilePath string) {
 	ext := ".xbcrypt"
 	if !strings.HasSuffix(filePath, ext) {
 		fmt.Println("file path must end with .xbcrypt")
 		return
 	}
-	destFilePath = strings.TrimSuffix(filePath, ext)
+
+	if destFilePath == "" {
+		destFilePath = strings.TrimSuffix(filePath, ext)
+	}
 
 	src, err := os.Open(filePath)
 	if err != nil {
@@ -34,6 +66,7 @@ func main() {
 		return
 	}
 	defer src.Close()
+
 	dest, err := os.OpenFile(destFilePath, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		fmt.Println("failed to open file:", err)
@@ -42,7 +75,7 @@ func main() {
 	defer dest.Close()
 
 	limitSize := int64(5 * 1024 * 1024)
-	decryptContext, err := xbcrypt.NewDecryptContext(key, src, dest, limitSize)
+	decryptContext, err := xbcrypt.NewDecryptContext([]byte(key), src, dest, limitSize)
 	if err != nil {
 		fmt.Println("failed to create decrypt context:", err)
 		return

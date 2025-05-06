@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"hash/crc32"
 	"io"
@@ -11,9 +10,10 @@ import (
 	"strings"
 
 	"github.com/zing22845/go-qpress"
-	"github.com/zing22845/go-xbstream/xbstream"
+	"github.com/zing22845/go-xbstream/pkg/xbstream"
 
-	"github.com/zing22845/go-xbstream/index"
+	"github.com/zing22845/go-xbstream/internal/utils"
+	"github.com/zing22845/go-xbstream/pkg/index"
 )
 
 type qpFile struct {
@@ -25,40 +25,6 @@ type qpFile struct {
 type normalFile struct {
 	file        *os.File
 	writtenSize int64
-}
-
-func FindNextMagic(file *os.File, offset int64) (newOffset int64, err error) {
-	const bufferSize = 4096
-	buffer := make([]byte, bufferSize)
-	defer func() {
-		if err != nil {
-			return
-		}
-		// seek file to offset
-		newOffset, err = file.Seek(offset, io.SeekStart)
-	}()
-
-	for {
-		n, err := file.Read(buffer)
-		if err != nil {
-			return offset, err
-		}
-		// Search for magic bytes in the buffer
-		index := bytes.Index(buffer[:], xbstream.ChunkMagic)
-		if index != -1 {
-			offset += int64(index)
-			return offset, nil
-		}
-		// Update offset
-		offset += int64(n)
-		// Move the file pointer back by len(magic) - 1 bytes to handle overlapping cases
-		if n == bufferSize {
-			if _, err := file.Seek(int64(1-xbstream.MagicLen), io.SeekCurrent); err != nil {
-				return -1, err
-			}
-			offset -= int64(xbstream.MagicLen - 1)
-		}
-	}
 }
 
 func main() {
@@ -116,7 +82,7 @@ func main() {
 				break
 			}
 			log.Printf("read chunk header failed at offset: %d\n", offset)
-			offset, err = FindNextMagic(file, offset)
+			offset, err = utils.FindNextBytes(file, offset, xbstream.ChunkMagic)
 			if err != nil {
 				if err == io.EOF {
 					break

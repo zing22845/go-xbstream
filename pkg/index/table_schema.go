@@ -21,7 +21,7 @@ import (
 	frmutils "github.com/zing22845/go-frm-parser/frm/utils"
 	"github.com/zing22845/go-ibd2schema"
 	"github.com/zing22845/go-qpress"
-	"github.com/zing22845/go-xbstream/xbcrypt"
+	"github.com/zing22845/go-xbstream/pkg/xbcrypt"
 	"gorm.io/gorm"
 )
 

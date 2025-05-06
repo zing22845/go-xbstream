@@ -17,7 +17,7 @@ import (
 	"github.com/meilisearch/meilisearch-go"
 	log "github.com/sirupsen/logrus"
 	gormv2logrus "github.com/thomas-tacquet/gormv2-logrus"
-	"github.com/zing22845/go-xbstream/xbstream"
+	"github.com/zing22845/go-xbstream/pkg/xbstream"
 	"github.com/zing22845/readseekerpool"
 
 	"gorm.io/gorm"
