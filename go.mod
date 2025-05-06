@@ -1,6 +1,8 @@
 module github.com/zing22845/go-xbstream
 
-go 1.22.6
+go 1.23.0
+
+toolchain go1.23.8
 
 require (
 	github.com/akamensky/argparse v1.4.0
@@ -10,13 +12,13 @@ require (
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20240415074806-224ae1547850
 	github.com/pkg/errors v0.9.1
 	github.com/sirupsen/logrus v1.9.3
-	github.com/skmcgrail/go-xbstream v1.1.0
 	github.com/stretchr/testify v1.9.0
 	github.com/thomas-tacquet/gormv2-logrus v1.2.3
 	github.com/zing22845/go-frm-parser v0.0.0-20240616151208-0796627d6a98
 	github.com/zing22845/go-ibd2schema v0.0.0-20240624053956-78daecfda609
 	github.com/zing22845/go-qpress v0.0.0-20240612045338-df3664976931
 	github.com/zing22845/readseekerpool v0.0.0-20240623144742-c140b312a124
+	golang.org/x/time v0.11.0
 	gorm.io/gorm v1.25.7
 )
 
