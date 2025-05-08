@@ -517,35 +517,21 @@ func setupIndexStream(
 }
 
 // getChunkIndices 从数据库获取所有数据块索引
-func getChunkIndices(indexStream *IndexStream) (chan *ChunkIndex, error) {
-	chunkIndexChan := make(chan *ChunkIndex, 100)
+func getChunkIndices(indexStream *IndexStream) (map[string][]*ChunkIndex, error) {
+	var indices []*ChunkIndex
+	result := indexStream.IndexDB.Find(&indices)
+	if result.Error != nil {
+		return nil, errors.Wrap(result.Error, "querying chunk indices")
+	}
 
-	go func() {
-		defer close(chunkIndexChan)
+	// Group chunk indices by filepath
+	fileChunks := make(map[string][]*ChunkIndex)
+	for _, ci := range indices {
+		ci.DecodeFilepath()
+		fileChunks[ci.Filepath] = append(fileChunks[ci.Filepath], ci)
+	}
 
-		var indices []*ChunkIndex
-		result := indexStream.IndexDB.Find(&indices)
-		if result.Error != nil {
-			return
-		}
-
-		// Group chunk indices by filepath
-		fileChunks := make(map[string][]*ChunkIndex)
-		for _, ci := range indices {
-			ci.DecodeFilepath()
-			fileChunks[ci.Filepath] = append(fileChunks[ci.Filepath], ci)
-		}
-
-		// Send chunk indices grouped by file to the channel
-		for _, chunks := range fileChunks {
-			// Send each chunk to the channel
-			for _, chunk := range chunks {
-				chunkIndexChan <- chunk
-			}
-		}
-	}()
-
-	return chunkIndexChan, nil
+	return fileChunks, nil
 }
 
 func ExtractFilesByIndex(
@@ -578,26 +564,25 @@ func ExtractFilesByIndex(
 	}
 	defer indexStream.CloseIndexDB()
 
-	// 获取所有数据块索引
-	chunkIndexChan, err := getChunkIndices(indexStream)
+	// 获取所有数据块索引，并按文件分组
+	fileChunksMap, err := getChunkIndices(indexStream)
 	if err != nil {
 		return 0, err
+	}
+
+	// 创建文件路径列表
+	filePaths := make([]string, 0, len(fileChunksMap))
+	for filePath := range fileChunksMap {
+		filePaths = append(filePaths, filePath)
 	}
 
 	// Extract files in parallel
 	var wg sync.WaitGroup
 	var totalSize atomic.Int64
-	errorChan := make(chan error, 1)
+	errorChan := make(chan error, concurrency) // 增大错误通道容量
 
-	// Track unique filepaths to avoid duplicate extractions
-	extractedFiles := sync.Map{}
-
-	for ci := range chunkIndexChan {
-		// Skip if we've already started extracting this file
-		if _, loaded := extractedFiles.LoadOrStore(ci.Filepath, true); loaded {
-			continue
-		}
-
+	// 处理文件
+	for _, filePath := range filePaths {
 		// 使用信号量控制并发数
 		select {
 		case sem <- struct{}{}: // 获取信号量，如果已满则阻塞
@@ -606,34 +591,52 @@ func ExtractFilesByIndex(
 		}
 
 		wg.Add(1)
-		go func(ci *ChunkIndex) {
+		go func(filePath string) {
 			defer wg.Done()
 			defer func() { <-sem }() // 释放信号量
+
+			// 获取第一个块作为代表
+			chunks := fileChunksMap[filePath]
+			if len(chunks) == 0 {
+				return // 跳过没有块的文件
+			}
+
+			ci := chunks[0] // 使用第一个块作为代表
 
 			fileSize, err := extractFileWorker(ci, indexStream, rsp, targetDIR, rateLimiter)
 			if err != nil {
 				select {
 				case errorChan <- err:
 				default:
+					// 如果通道已满，记录错误但不阻塞
 				}
 				return
 			}
 
 			totalSize.Add(fileSize)
-		}(ci)
+		}(filePath)
 	}
 
-	// Wait for either an error or all goroutines to finish
+	// 等待所有工作完成或出错
+	done := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(errorChan)
+		close(done)
 	}()
 
-	// Return first error encountered, if any
-	for err := range errorChan {
-		if err != nil {
-			return 0, err
+	// 等待完成或上下文取消
+	select {
+	case <-done:
+		// 所有工作完成
+		close(errorChan)
+		// 检查是否有错误
+		for err := range errorChan {
+			if err != nil {
+				return 0, err
+			}
 		}
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 
 	return totalSize.Load(), nil
