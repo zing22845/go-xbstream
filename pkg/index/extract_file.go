@@ -486,6 +486,7 @@ func setupIndexStream(
 	idxFileName string,
 	targetDIR string,
 	encryptKey []byte,
+	rsp *readseekerpool.ReadSeekerPool,
 ) (*IndexStream, error) {
 	indexStream := NewIndexStream(
 		ctx,
@@ -501,7 +502,7 @@ func setupIndexStream(
 	)
 
 	// Extract the index file
-	indexStream.ExtractIndexFile(nil, targetDIR)
+	indexStream.ExtractIndexFile(rsp, targetDIR)
 	if indexStream.Err != nil {
 		return nil, errors.Wrap(indexStream.Err, "extracting index file")
 	}
@@ -571,7 +572,7 @@ func ExtractFilesByIndex(
 	}
 
 	// 设置 IndexStream
-	indexStream, err := setupIndexStream(ctx, idxFileName, targetDIR, encryptKey)
+	indexStream, err := setupIndexStream(ctx, idxFileName, targetDIR, encryptKey, rsp)
 	if err != nil {
 		return 0, err
 	}
