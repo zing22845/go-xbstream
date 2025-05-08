@@ -395,7 +395,8 @@ func extractFileWorker(
 	if err != nil {
 		return 0, errors.Wrap(err, "creating file schema")
 	}
-	defer fileSchema.StreamIn.Close()
+	// 确保在函数退出时关闭所有管道，防止资源泄漏
+	defer fileSchema.CloseAllPipes()
 
 	// 创建目标文件
 	targetFilepath := filepath.Join(targetDIR, fileSchema.DecompressedFilepath)
@@ -421,11 +422,18 @@ func extractFileWorker(
 		writer = &rateLimitedWriter{w: writer, limiter: rateLimiter}
 	}
 
-	// 启动文件处理
-	err = fileSchema.ProcessFile()
-	if err != nil {
-		return 0, errors.Wrap(err, "processing file")
-	}
+	// 创建一个goroutine来处理数据写入
+	processDone := make(chan struct{})
+	processErr := make(chan error, 1)
+
+	// 启动文件处理，直接写入目标文件
+	go func() {
+		defer close(processDone)
+		if err := fileSchema.ProcessToWriter(writer); err != nil {
+			processErr <- err
+			return
+		}
+	}()
 
 	// 获取文件的所有数据块
 	fileChunks, err := getFileChunks(indexStream, ci.Filepath)
@@ -434,6 +442,7 @@ func extractFileWorker(
 	}
 
 	// 处理所有数据块
+	var writtenSize int64
 	for _, chunk := range fileChunks {
 		rs, err := rsp.Get()
 		if err != nil {
@@ -453,19 +462,24 @@ func extractFileWorker(
 		if err != nil {
 			return 0, errors.Wrap(err, "writing chunk data")
 		}
-		fileSize += n
+		writtenSize += n
 	}
 
-	// 确保关闭StreamIn，通知处理已完成
+	// 关闭输入流，表示写入完成
 	fileSchema.StreamIn.Close()
 
-	// 从 FileSchema 的输出流读取处理后的数据并写入目标文件
-	processedSize, err := io.Copy(writer, fileSchema.ParseOut)
-	if err != nil {
-		return 0, errors.Wrap(err, "writing processed data")
+	// 等待处理完成
+	select {
+	case err := <-processErr:
+		return 0, err
+	case <-processDone:
+		// 获取文件大小作为处理后的大小
+		fileInfo, err := targetFile.Stat()
+		if err != nil {
+			return 0, errors.Wrap(err, "getting file size")
+		}
+		return fileInfo.Size(), nil
 	}
-
-	return processedSize, nil
 }
 
 // getFileChunks 获取文件的所有数据块
