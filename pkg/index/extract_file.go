@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 
 	"github.com/pkg/errors"
-	"github.com/zing22845/go-qpress"
-	"github.com/zing22845/go-xbstream/pkg/xbcrypt"
 	"github.com/zing22845/go-xbstream/pkg/xbstream"
 	"github.com/zing22845/readseekerpool"
 	"golang.org/x/time/rate"
@@ -374,33 +372,124 @@ func ExtractFiles(r io.Reader, targetDIR string) (n int64, err error) {
 	return n, nil
 }
 
-func ExtractFilesByIndex(
-	ctx context.Context,
-	idxFileName string,
-	encryptKey []byte,
+// extractFileWorker 处理单个文件的提取
+func extractFileWorker(
+	ci *ChunkIndex,
+	indexStream *IndexStream,
 	rsp *readseekerpool.ReadSeekerPool,
 	targetDIR string,
-	concurrency int,
-	bytesPerSecond uint64, // 添加限速参数，单位为字节/秒
-) (n int64, err error) {
-	// 如果并发数设置为0或负数，则使用默认值
-	if concurrency <= 0 {
-		concurrency = 10 // 默认并发数
+	rateLimiter *rate.Limiter,
+) (fileSize int64, err error) {
+	// 创建 FileSchema 实例
+	fileSchema, err := NewFileSchema(
+		ci.Filepath,
+		ci.ExtractLimitSize,
+		ci.EncryptKey,
+		ci.DecryptedFileType,
+		ci.DecryptMethod,
+		ci.DecompressedFileType,
+		ci.DecompressMethod,
+	)
+	if err != nil {
+		return 0, errors.Wrap(err, "creating file schema")
+	}
+	defer fileSchema.StreamIn.Close()
+
+	// 创建目标文件
+	targetFilepath := filepath.Join(targetDIR, fileSchema.DecompressedFilepath)
+	err = os.MkdirAll(filepath.Dir(targetFilepath), 0777)
+	if err != nil {
+		return 0, errors.Wrapf(err, "creating directory for %s", targetFilepath)
 	}
 
-	// 创建信号量来限制并发数
-	sem := make(chan struct{}, concurrency)
+	// 创建目标文件
+	targetFile, err := os.OpenFile(
+		targetFilepath,
+		os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_EXCL,
+		0666,
+	)
+	if err != nil {
+		return 0, errors.Wrapf(err, "creating target file %s", targetFilepath)
+	}
+	defer targetFile.Close()
 
-	// 创建全局限速器用于所有文件操作共享
-	var rateLimiter *rate.Limiter
-	if bytesPerSecond > 0 {
-		rateLimiter = rate.NewLimiter(rate.Limit(bytesPerSecond), 1024*1024)
+	// 创建写入器链
+	var writer io.Writer = targetFile
+	if rateLimiter != nil {
+		writer = &rateLimitedWriter{w: writer, limiter: rateLimiter}
 	}
 
-	// Create a new IndexStream instance
+	// 启动文件处理
+	err = fileSchema.ProcessFile()
+	if err != nil {
+		return 0, errors.Wrap(err, "processing file")
+	}
+
+	// 获取文件的所有数据块
+	fileChunks, err := getFileChunks(indexStream, ci.Filepath)
+	if err != nil {
+		return 0, err
+	}
+
+	// 处理所有数据块
+	for _, chunk := range fileChunks {
+		rs, err := rsp.Get()
+		if err != nil {
+			return 0, errors.Wrap(err, "getting reader from pool")
+		}
+
+		// 定位到数据块开始位置
+		_, err = rs.Seek(chunk.StartPosition+int64(chunk.Chunk.HeaderSize), io.SeekStart)
+		if err != nil {
+			rsp.Put(rs)
+			return 0, errors.Wrapf(err, "seeking to position %d", chunk.StartPosition)
+		}
+
+		// 写入数据到 FileSchema 的输入流
+		n, err := io.CopyN(fileSchema.StreamIn, rs, int64(chunk.Chunk.PayLen))
+		rsp.Put(rs)
+		if err != nil {
+			return 0, errors.Wrap(err, "writing chunk data")
+		}
+		fileSize += n
+	}
+
+	// 从 FileSchema 的输出流读取处理后的数据并写入目标文件
+	processedSize, err := io.Copy(writer, fileSchema.ParseOut)
+	if err != nil {
+		return 0, errors.Wrap(err, "writing processed data")
+	}
+
+	return processedSize, nil
+}
+
+// getFileChunks 获取文件的所有数据块
+func getFileChunks(indexStream *IndexStream, filepath string) ([]*ChunkIndex, error) {
+	var fileChunks []*ChunkIndex
+	result := indexStream.IndexDB.Where("filepath = ?", filepath).Find(&fileChunks)
+	if result.Error != nil {
+		return nil, errors.Wrapf(result.Error, "querying chunks for file %s", filepath)
+	}
+
+	for _, chunk := range fileChunks {
+		chunk.DecodeFilepath()
+		chunk.EncryptKey = indexStream.EncryptKey
+		chunk.ExtractLimitSize = indexStream.ExtractLimitSize
+	}
+
+	return fileChunks, nil
+}
+
+// setupIndexStream 设置和初始化 IndexStream
+func setupIndexStream(
+	ctx context.Context,
+	idxFileName string,
+	targetDIR string,
+	encryptKey []byte,
+) (*IndexStream, error) {
 	indexStream := NewIndexStream(
-		ctx,         // context will be created in NewIndexStream
-		idxFileName, // Index filename
+		ctx,
+		idxFileName,
 		targetDIR,
 		"",    // MySQL version not needed for extraction
 		false, // Don't remove local index file
@@ -412,29 +501,30 @@ func ExtractFilesByIndex(
 	)
 
 	// Extract the index file
-	indexStream.ExtractIndexFile(rsp, targetDIR)
+	indexStream.ExtractIndexFile(nil, targetDIR)
 	if indexStream.Err != nil {
-		return 0, errors.Wrap(indexStream.Err, "extracting index file")
+		return nil, errors.Wrap(indexStream.Err, "extracting index file")
 	}
 
 	// Connect to the SQLite index database
 	indexStream.ConnectIndexDB()
 	if indexStream.Err != nil {
-		return 0, errors.Wrap(indexStream.Err, "connecting to index database")
+		return nil, errors.Wrap(indexStream.Err, "connecting to index database")
 	}
-	defer indexStream.CloseIndexDB()
 
-	// Create a channel for chunk indices
+	return indexStream, nil
+}
+
+// getChunkIndices 从数据库获取所有数据块索引
+func getChunkIndices(indexStream *IndexStream) (chan *ChunkIndex, error) {
 	chunkIndexChan := make(chan *ChunkIndex, 100)
 
-	// Query all chunk indices from the database
 	go func() {
 		defer close(chunkIndexChan)
 
 		var indices []*ChunkIndex
 		result := indexStream.IndexDB.Find(&indices)
 		if result.Error != nil {
-			err = errors.Wrap(result.Error, "querying chunk indices")
 			return
 		}
 
@@ -453,6 +543,45 @@ func ExtractFilesByIndex(
 			}
 		}
 	}()
+
+	return chunkIndexChan, nil
+}
+
+func ExtractFilesByIndex(
+	ctx context.Context,
+	idxFileName string,
+	encryptKey []byte,
+	rsp *readseekerpool.ReadSeekerPool,
+	targetDIR string,
+	concurrency int,
+	bytesPerSecond uint64,
+) (n int64, err error) {
+	// 如果并发数设置为0或负数，则使用默认值
+	if concurrency <= 0 {
+		concurrency = 10 // 默认并发数
+	}
+
+	// 创建信号量来限制并发数
+	sem := make(chan struct{}, concurrency)
+
+	// 创建全局限速器用于所有文件操作共享
+	var rateLimiter *rate.Limiter
+	if bytesPerSecond > 0 {
+		rateLimiter = rate.NewLimiter(rate.Limit(bytesPerSecond), 1024*1024)
+	}
+
+	// 设置 IndexStream
+	indexStream, err := setupIndexStream(ctx, idxFileName, targetDIR, encryptKey)
+	if err != nil {
+		return 0, err
+	}
+	defer indexStream.CloseIndexDB()
+
+	// 获取所有数据块索引
+	chunkIndexChan, err := getChunkIndices(indexStream)
+	if err != nil {
+		return 0, err
+	}
 
 	// Extract files in parallel
 	var wg sync.WaitGroup
@@ -480,63 +609,13 @@ func ExtractFilesByIndex(
 			defer wg.Done()
 			defer func() { <-sem }() // 释放信号量
 
-			// Create a channel for this file's chunks
-			fileChunkChan := make(chan *ChunkIndex, 20)
-
-			// Get all chunks for this file
-			var fileChunks []*ChunkIndex
-			result := indexStream.IndexDB.Where("filepath = ?", ci.Filepath).Find(&fileChunks)
-			if result.Error != nil {
-				select {
-				case errorChan <- errors.Wrapf(result.Error, "querying chunks for file %s", ci.Filepath):
-				default:
-				}
-				return
-			}
-
-			// Send all chunks to the channel
-			go func() {
-				defer close(fileChunkChan)
-				for _, chunk := range fileChunks {
-					chunk.DecodeFilepath()
-					chunk.EncryptKey = indexStream.EncryptKey
-					chunk.ExtractLimitSize = indexStream.ExtractLimitSize
-					fileChunkChan <- chunk
-				}
-			}()
-
-			// Extract the file with rate limiting
-			fileSize, err := extractFileWithRateLimit(rsp, fileChunkChan, ci.Filepath, targetDIR, rateLimiter)
+			fileSize, err := extractFileWorker(ci, indexStream, rsp, targetDIR, rateLimiter)
 			if err != nil {
 				select {
-				case errorChan <- errors.Wrapf(err, "extracting file %s", ci.Filepath):
+				case errorChan <- err:
 				default:
 				}
 				return
-			}
-
-			// Handle decryption if needed
-			if ci.DecryptMethod == "xbcrypt" {
-				err = processDecryptionWithRateLimit(filepath.Join(targetDIR, ci.Filepath), indexStream.EncryptKey, rateLimiter)
-				if err != nil {
-					select {
-					case errorChan <- errors.Wrapf(err, "decrypting file %s", ci.Filepath):
-					default:
-					}
-					return
-				}
-			}
-
-			// Handle decompression if needed
-			if ci.DecompressMethod == "qp" {
-				err = processDecompressionWithRateLimit(filepath.Join(targetDIR, ci.Filepath), rateLimiter)
-				if err != nil {
-					select {
-					case errorChan <- errors.Wrapf(err, "decompressing file %s", ci.Filepath):
-					default:
-					}
-					return
-				}
 			}
 
 			totalSize.Add(fileSize)
@@ -557,285 +636,4 @@ func ExtractFilesByIndex(
 	}
 
 	return totalSize.Load(), nil
-}
-
-// 带限速的文件提取方法
-func extractFileWithRateLimit(
-	rsp *readseekerpool.ReadSeekerPool,
-	cis chan *ChunkIndex,
-	filePath,
-	targetDIR string,
-	limiter *rate.Limiter,
-) (n int64, err error) {
-	targetFilepath := filepath.Join(targetDIR, filePath)
-	err = os.MkdirAll(filepath.Dir(targetFilepath), 0777)
-	if err != nil {
-		return -1, err
-	}
-	targetFile, err := os.OpenFile(
-		targetFilepath,
-		os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_EXCL,
-		0666,
-	)
-	if err != nil {
-		return -1, errors.Wrapf(err, "create target file %s", targetFilepath)
-	}
-	defer targetFile.Close()
-	var wg sync.WaitGroup
-	var fileSize int64
-	var totalWritten atomic.Int64
-	errChan := make(chan error, 1)
-	for ci := range cis {
-		if ci.Filepath != filePath {
-			return -1, errors.Errorf("unexpected chunk index filepath: %s", ci.Filepath)
-		}
-		wg.Add(1)
-		go func(ci *ChunkIndex) {
-			var err error
-			var n int64
-			defer func() {
-				if err != nil {
-					select {
-					case errChan <- err:
-						// Error sent to channel
-					default:
-						// If the channel is already written to (in case multiple goroutines error out simultaneously),
-						// do nothing.
-					}
-				}
-				wg.Done()
-				totalWritten.Add(n)
-			}()
-			n, err = extractSingleChunkIndexWithRateLimit(ci, rsp, targetFilepath, limiter)
-		}(ci)
-	}
-	// Wait for either an error or all goroutines to finish
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-	for err := range errChan {
-		if err != nil {
-			return -1, err
-		}
-	}
-	fileInfo, err := targetFile.Stat()
-	if err != nil {
-		return -1, errors.Wrapf(err, "stat target file %s", targetFilepath)
-	}
-	fileSize = fileInfo.Size()
-	writtenSize := totalWritten.Load()
-	if fileSize != writtenSize {
-		return -1, errors.Errorf("expected file size %d, got %d", fileSize, writtenSize)
-	}
-	return fileSize, nil
-}
-
-// 带限速的解密方法
-func processDecryptionWithRateLimit(filePath string, key []byte, limiter *rate.Limiter) error {
-	// Read the encrypted file
-	encryptedFile, err := os.Open(filePath)
-	if err != nil {
-		return errors.Wrapf(err, "opening encrypted file %s", filePath)
-	}
-	defer encryptedFile.Close()
-
-	// Create a temporary file for decrypted content
-	decryptedPath := filePath[:len(filePath)-len(".xbcrypt")]
-	decryptedFile, err := os.Create(decryptedPath)
-	if err != nil {
-		return errors.Wrapf(err, "creating decrypted file %s", decryptedPath)
-	}
-	defer decryptedFile.Close()
-
-	// 应用限速写入
-	var writer io.Writer = decryptedFile
-	if limiter != nil {
-		writer = &rateLimitedWriter{w: decryptedFile, limiter: limiter}
-	}
-
-	// Initialize decryption context
-	dc, err := xbcrypt.NewDecryptContext(key, encryptedFile, writer, 0)
-	if err != nil {
-		return errors.Wrap(err, "creating decrypt context")
-	}
-
-	// Process decryption
-	err = dc.ProcessChunks()
-	if err != nil {
-		return errors.Wrap(err, "processing decrypt chunks")
-	}
-
-	// Remove the encrypted file
-	err = os.Remove(filePath)
-	if err != nil {
-		return errors.Wrapf(err, "removing encrypted file %s", filePath)
-	}
-
-	return nil
-}
-
-// 带限速的解压缩方法
-func processDecompressionWithRateLimit(filePath string, limiter *rate.Limiter) error {
-	// Read the compressed file
-	compressedFile, err := os.Open(filePath)
-	if err != nil {
-		return errors.Wrapf(err, "opening compressed file %s", filePath)
-	}
-	defer compressedFile.Close()
-
-	// Create a temporary file for decompressed content
-	decompressedPath := filePath[:len(filePath)-len(".qp")]
-	decompressedFile, err := os.Create(decompressedPath)
-	if err != nil {
-		return errors.Wrapf(err, "creating decompressed file %s", decompressedPath)
-	}
-	defer decompressedFile.Close()
-
-	// 应用限速写入
-	var writer io.Writer = decompressedFile
-	if limiter != nil {
-		writer = &rateLimitedWriter{w: decompressedFile, limiter: limiter}
-	}
-
-	// Initialize qpress decompression
-	qpressFile := &qpress.ArchiveFile{}
-	_, err = qpressFile.DecompressStream(compressedFile, writer, 0)
-	if err != nil {
-		return errors.Wrap(err, "decompressing data")
-	}
-
-	// Remove the compressed file
-	err = os.Remove(filePath)
-	if err != nil {
-		return errors.Wrapf(err, "removing compressed file %s", filePath)
-	}
-
-	return nil
-}
-
-// 带限速的文件写入方法
-func writeChunkPayloadWithRateLimit(rsp *readseekerpool.ReadSeekerPool, ci *ChunkIndex, filePath string, limiter *rate.Limiter) (n int64, err error) {
-	// timer := utils.NewSimpleTimer()
-	// timer.Start()
-	payLen := int64(ci.Chunk.PayLen)
-	if ci.Chunk.PayLen == 0 {
-		return payLen, nil
-	}
-	rs, err := rsp.Get()
-	if err != nil {
-		return -1, errors.Wrap(err, "get reader from pool")
-	}
-	defer rsp.Put(rs)
-	// seek reader to the start position of chunk payload
-	payStartPosition := ci.StartPosition + int64(ci.Chunk.HeaderSize)
-	_, err = rs.Seek(payStartPosition, io.SeekStart)
-	if err != nil {
-		return -1, errors.Wrapf(err, "seek reader to pay start position %d", payStartPosition)
-	}
-	// Open the file only if it exists
-	file, err := os.OpenFile(filePath, os.O_RDWR, 0666)
-	if err != nil {
-		return -1, errors.Wrapf(err, "opening file %s", filePath)
-	}
-	defer file.Close()
-	// seek file to the payload write offset
-	_, err = file.Seek(int64(ci.Chunk.PayOffset), io.SeekStart)
-	if err != nil {
-		return -1, errors.Wrapf(err, "seek to %d", ci.Chunk.PayOffset)
-	}
-
-	// 应用限速写入
-	var writer io.Writer = file
-	if limiter != nil {
-		// 如果有限速器，包装成限速写入器
-		writer = &rateLimitedWriter{w: file, limiter: limiter}
-	}
-
-	// 直接从读取器写入到文件，避免中间缓冲区
-	n, err = io.CopyN(writer, rs, payLen)
-	if err != nil {
-		return -1, err
-	}
-
-	return payLen, nil
-}
-
-// 带限速的块写入方法
-func writeChunksWithRateLimit(
-	rsp *readseekerpool.ReadSeekerPool,
-	subChunkChan chan *ChunkIndex,
-	filePath string,
-	limiter *rate.Limiter,
-) (n int64, err error) {
-	var wg sync.WaitGroup
-	var writtenSize atomic.Int64
-	errChan := make(chan error, 1)
-	for ci := range subChunkChan {
-		wg.Add(1)
-		go func(ci *ChunkIndex) {
-			var err error
-			var payLen int64
-			defer func() {
-				if err != nil {
-					select {
-					case errChan <- err:
-						// Error sent to channel
-					default:
-						// If the channel is already written to (in case multiple goroutines error out simultaneously),
-						// do nothing.
-					}
-				}
-				writtenSize.Add(payLen)
-				wg.Done()
-			}()
-			payLen, err = writeChunkPayloadWithRateLimit(rsp, ci, filePath, limiter)
-		}(ci)
-	}
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-	for err := range errChan {
-		if err != nil {
-			return -1, err
-		}
-	}
-	return writtenSize.Load(), nil
-}
-
-// 带限速的单块提取方法
-func extractSingleChunkIndexWithRateLimit(
-	ci *ChunkIndex,
-	rsp *readseekerpool.ReadSeekerPool,
-	filePath string,
-	limiter *rate.Limiter,
-) (n int64, err error) {
-	subChunkChan := make(chan *ChunkIndex, 20)
-	errChan := make(chan error, 1)
-	go func() {
-		defer func() {
-			if err != nil {
-				select {
-				case errChan <- err:
-					// Error sent to channel
-				default:
-					// If the channel is already written to (in case multiple goroutines error out simultaneously),
-					// do nothing.
-				}
-			}
-			close(errChan)
-		}()
-		n, err = writeChunksWithRateLimit(rsp, subChunkChan, filePath, limiter)
-	}()
-	err = readChunks(ci, rsp, subChunkChan)
-	if err != nil {
-		return -1, err
-	}
-	for err := range errChan {
-		if err != nil {
-			return -1, err
-		}
-	}
-	return n, nil
 }
