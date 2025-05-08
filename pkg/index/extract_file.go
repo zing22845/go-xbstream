@@ -382,6 +382,17 @@ func extractFileWorker(
 	targetDIR string,
 	rateLimiter *rate.Limiter,
 ) (fileSize int64, err error) {
+	// 检查必要的参数是否为nil
+	if ci == nil {
+		return 0, errors.New("chunk index is nil")
+	}
+	if indexStream == nil {
+		return 0, errors.New("index stream is nil")
+	}
+	if rsp == nil {
+		return 0, errors.New("read seeker pool is nil")
+	}
+
 	// 创建 FileSchema 实例
 	fileSchema, err := NewFileSchema(
 		ci.Filepath,
@@ -444,6 +455,14 @@ func extractFileWorker(
 	// 处理所有数据块
 	var writtenSize int64
 	for _, chunk := range fileChunks {
+		// 检查数据块和必要的字段是否为nil
+		if chunk == nil {
+			continue // 跳过无效的数据块
+		}
+		if chunk.Chunk == nil {
+			continue // 跳过没有Chunk数据的块
+		}
+
 		rs, err := rsp.Get()
 		if err != nil {
 			return 0, errors.Wrap(err, "getting reader from pool")
@@ -459,14 +478,16 @@ func extractFileWorker(
 		// 写入数据到 FileSchema 的输入流
 		n, err := io.CopyN(fileSchema.StreamIn, rs, int64(chunk.Chunk.PayLen))
 		rsp.Put(rs)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return 0, errors.Wrap(err, "writing chunk data")
 		}
 		writtenSize += n
 	}
 
 	// 关闭输入流，表示写入完成
-	fileSchema.StreamIn.Close()
+	if fileSchema.StreamIn != nil {
+		fileSchema.StreamIn.Close()
+	}
 
 	// 等待处理完成
 	select {

@@ -104,6 +104,10 @@ func (fs *FileSchema) prepareStream() (err error) {
 }
 
 func (fs *FileSchema) decryptStream() (err error) {
+	if fs.StreamOut == nil {
+		return fmt.Errorf("StreamOut is nil")
+	}
+
 	switch fs.DecryptMethod {
 	case "xbcrypt":
 		defer func() {
@@ -122,8 +126,14 @@ func (fs *FileSchema) decryptStream() (err error) {
 
 		var writer io.Writer
 		if fs.DecompressMethod == "qp" {
+			if fs.MidPipeIn == nil {
+				return fmt.Errorf("MidPipeIn is nil for qp decompression")
+			}
 			writer = fs.MidPipeIn
 		} else {
+			if fs.OutputWriter == nil {
+				return fmt.Errorf("OutputWriter is nil")
+			}
 			writer = fs.OutputWriter
 		}
 
@@ -140,11 +150,14 @@ func (fs *FileSchema) decryptStream() (err error) {
 			// 需要解压缩，创建中间管道
 			fs.MidPipeOut, fs.MidPipeIn = io.Pipe()
 			go func() {
+				defer fs.MidPipeIn.Close()
 				_, _ = io.Copy(fs.MidPipeIn, fs.StreamOut)
-				fs.MidPipeIn.Close()
 			}()
 		} else {
 			// 无需解压缩，直接复制到输出
+			if fs.OutputWriter == nil {
+				return fmt.Errorf("OutputWriter is nil")
+			}
 			go func() {
 				_, _ = io.Copy(fs.OutputWriter, fs.StreamOut)
 			}()
@@ -158,6 +171,13 @@ func (fs *FileSchema) decryptStream() (err error) {
 func (fs *FileSchema) decompressStream() (err error) {
 	switch fs.DecompressMethod {
 	case "qp":
+		if fs.MidPipeOut == nil {
+			return fmt.Errorf("MidPipeOut is nil for qp decompression")
+		}
+		if fs.OutputWriter == nil {
+			return fmt.Errorf("OutputWriter is nil")
+		}
+
 		var isPartial bool
 		defer func() {
 			if err != nil {
@@ -183,6 +203,10 @@ func (fs *FileSchema) decompressStream() (err error) {
 
 // ProcessToWriter 处理文件并写入到指定的写入器
 func (fs *FileSchema) ProcessToWriter(writer io.Writer) (err error) {
+	if writer == nil {
+		return fmt.Errorf("output writer is nil")
+	}
+
 	fs.OutputWriter = writer
 
 	// 启动协程来处理流式数据
