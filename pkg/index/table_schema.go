@@ -252,7 +252,9 @@ func (ts *TableSchema) decryptStream() (err error) {
 				}
 				_, _ = io.Copy(io.Discard, ts.StreamOut)
 			}
-			_ = ts.MidPipeIn.Close()
+			if ts.MidPipeIn != nil {
+				_ = ts.MidPipeIn.Close()
+			}
 		}()
 		decryptContext, err := xbcrypt.NewDecryptContext(
 			ts.EncryptKey, ts.StreamOut, ts.MidPipeIn, ts.ExtractLimitSize)

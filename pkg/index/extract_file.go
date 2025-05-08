@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/pkg/errors"
 	"github.com/zing22845/go-xbstream/pkg/xbstream"
@@ -374,153 +373,6 @@ func ExtractFiles(r io.Reader, targetDIR string) (n int64, err error) {
 	return n, nil
 }
 
-// extractFileWorker 处理单个文件的提取
-func extractFileWorker(
-	ci *ChunkIndex,
-	indexStream *IndexStream,
-	rsp *readseekerpool.ReadSeekerPool,
-	targetDIR string,
-	rateLimiter *rate.Limiter,
-) (fileSize int64, err error) {
-	// 检查必要的参数是否为nil
-	if ci == nil {
-		return 0, errors.New("chunk index is nil")
-	}
-	if indexStream == nil {
-		return 0, errors.New("index stream is nil")
-	}
-	if rsp == nil {
-		return 0, errors.New("read seeker pool is nil")
-	}
-
-	// 创建 FileSchema 实例
-	fileSchema, err := NewFileSchema(
-		ci.Filepath,
-		ci.ExtractLimitSize,
-		ci.EncryptKey,
-		ci.DecryptedFileType,
-		ci.DecryptMethod,
-		ci.DecompressedFileType,
-		ci.DecompressMethod,
-	)
-	if err != nil {
-		return 0, errors.Wrap(err, "creating file schema")
-	}
-	// 确保在函数退出时关闭所有管道，防止资源泄漏
-	defer fileSchema.CloseAllPipes()
-
-	// 创建目标文件
-	targetFilepath := filepath.Join(targetDIR, fileSchema.DecompressedFilepath)
-	err = os.MkdirAll(filepath.Dir(targetFilepath), 0777)
-	if err != nil {
-		return 0, errors.Wrapf(err, "creating directory for %s", targetFilepath)
-	}
-
-	// 创建目标文件
-	targetFile, err := os.OpenFile(
-		targetFilepath,
-		os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_EXCL,
-		0666,
-	)
-	if err != nil {
-		return 0, errors.Wrapf(err, "creating target file %s", targetFilepath)
-	}
-	defer targetFile.Close()
-
-	// 创建写入器链
-	var writer io.Writer = targetFile
-	if rateLimiter != nil {
-		writer = &rateLimitedWriter{w: writer, limiter: rateLimiter}
-	}
-
-	// 创建一个goroutine来处理数据写入
-	processDone := make(chan struct{})
-	processErr := make(chan error, 1)
-
-	// 启动文件处理，直接写入目标文件
-	go func() {
-		defer close(processDone)
-		if err := fileSchema.ProcessToWriter(writer); err != nil {
-			processErr <- err
-			return
-		}
-	}()
-
-	// 获取文件的所有数据块
-	fileChunks, err := getFileChunks(indexStream, ci.Filepath)
-	if err != nil {
-		return 0, err
-	}
-
-	// 处理所有数据块
-	var writtenSize int64
-	for _, chunk := range fileChunks {
-		// 检查数据块和必要的字段是否为nil
-		if chunk == nil {
-			continue // 跳过无效的数据块
-		}
-		if chunk.Chunk == nil {
-			continue // 跳过没有Chunk数据的块
-		}
-
-		rs, err := rsp.Get()
-		if err != nil {
-			return 0, errors.Wrap(err, "getting reader from pool")
-		}
-
-		// 定位到数据块开始位置
-		_, err = rs.Seek(chunk.StartPosition+int64(chunk.Chunk.HeaderSize), io.SeekStart)
-		if err != nil {
-			rsp.Put(rs)
-			return 0, errors.Wrapf(err, "seeking to position %d", chunk.StartPosition)
-		}
-
-		// 写入数据到 FileSchema 的输入流
-		n, err := io.CopyN(fileSchema.StreamIn, rs, int64(chunk.Chunk.PayLen))
-		rsp.Put(rs)
-		if err != nil && err != io.EOF {
-			return 0, errors.Wrap(err, "writing chunk data")
-		}
-		writtenSize += n
-	}
-
-	// 关闭输入流，表示写入完成
-	if fileSchema.StreamIn != nil {
-		fileSchema.StreamIn.Close()
-	}
-
-	// 等待处理完成
-	select {
-	case err := <-processErr:
-		return 0, err
-	case <-processDone:
-		// 获取文件大小作为处理后的大小
-		fileInfo, err := targetFile.Stat()
-		if err != nil {
-			return 0, errors.Wrap(err, "getting file size")
-		}
-		return fileInfo.Size(), nil
-	}
-}
-
-// getFileChunks 获取文件的所有数据块
-func getFileChunks(indexStream *IndexStream, filepath string) ([]*ChunkIndex, error) {
-	var fileChunks []*ChunkIndex
-	result := indexStream.IndexDB.Where("filepath = ?", filepath).Find(&fileChunks)
-	if result.Error != nil {
-		return nil, errors.Wrapf(result.Error, "querying chunks for file %s", filepath)
-	}
-
-	for _, chunk := range fileChunks {
-		chunk.DecodeFilepath()
-		chunk.EncryptKey = indexStream.EncryptKey
-		chunk.ExtractLimitSize = indexStream.ExtractLimitSize
-	}
-
-	return fileChunks, nil
-}
-
-// setupIndexStream 设置和初始化 IndexStream
 func setupIndexStream(
 	ctx context.Context,
 	idxFileName string,
@@ -556,45 +408,15 @@ func setupIndexStream(
 	return indexStream, nil
 }
 
-// getChunkIndices 从数据库获取所有数据块索引
-func getChunkIndices(indexStream *IndexStream) (map[string][]*ChunkIndex, error) {
-	var indices []*ChunkIndex
-	result := indexStream.IndexDB.Find(&indices)
-	if result.Error != nil {
-		return nil, errors.Wrap(result.Error, "querying chunk indices")
-	}
-
-	// Group chunk indices by filepath
-	fileChunks := make(map[string][]*ChunkIndex)
-	for _, ci := range indices {
-		ci.DecodeFilepath()
-		fileChunks[ci.Filepath] = append(fileChunks[ci.Filepath], ci)
-	}
-
-	return fileChunks, nil
-}
-
 func ExtractFilesByIndex(
 	ctx context.Context,
 	idxFileName string,
 	encryptKey []byte,
 	rsp *readseekerpool.ReadSeekerPool,
 	targetDIR string,
-	concurrency int,
 	bytesPerSecond uint64,
+	likePaths, notLikePaths []string,
 ) (n int64, err error) {
-	// 如果并发数设置为0或负数，则使用默认值
-	if concurrency <= 0 {
-		concurrency = 10 // 默认并发数
-	}
-
-	// 创建一个带超时的上下文
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*60*time.Second) // 30分钟超时
-	defer cancel()
-
-	// 创建信号量来限制并发数
-	sem := make(chan struct{}, concurrency)
-
 	// 创建全局限速器用于所有文件操作共享
 	var rateLimiter *rate.Limiter
 	if bytesPerSecond > 0 {
@@ -602,11 +424,13 @@ func ExtractFilesByIndex(
 	}
 
 	// 设置 IndexStream
-	indexStream, err := setupIndexStream(ctxWithTimeout, idxFileName, targetDIR, encryptKey, rsp)
+	indexStream, err := setupIndexStream(ctx, idxFileName, targetDIR, encryptKey, rsp)
 	if err != nil {
 		return 0, err
 	}
 	defer indexStream.CloseIndexDB()
+
+	indexStream.ExtractFiles(rsp, targetDIR, likePaths, notLikePaths)
 
 	// 获取所有数据块索引，并按文件分组
 	fileChunksMap, err := getChunkIndices(indexStream)
@@ -696,8 +520,8 @@ func ExtractFilesByIndex(
 			}
 		}
 		fmt.Printf("All %d files processed successfully\n", totalFiles)
-	case <-ctxWithTimeout.Done():
-		return 0, errors.Wrap(ctxWithTimeout.Err(), "operation timed out or was cancelled")
+	case <-ctx.Done():
+		return 0, errors.Wrap(ctx.Err(), "operation timed out or was cancelled")
 	}
 
 	return totalSize.Load(), nil

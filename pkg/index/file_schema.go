@@ -80,11 +80,13 @@ func (fs *FileSchema) prepareStream() (err error) {
 			fs.MidPipeOut, fs.MidPipeIn = io.Pipe()
 			fs.DecompressedFilepath = strings.TrimSuffix(fs.DecryptedFilepath, ".qp")
 		case "":
-			// decrypt and no decompress
+			// decrypt and no decompress, direct to output writer
 			fs.DecompressedFilepath = fs.DecryptedFilepath
 		}
 	case "":
-		// 对于未加密的情况，中间管道可能在处理时创建
+		// no decrypt, direct pipe to mid pipe
+		fs.MidPipeIn = fs.StreamIn
+		fs.MidPipeOut = fs.StreamOut
 		fs.DecryptedFilepath = fs.Filepath
 		switch fs.DecompressMethod {
 		case "qp":
@@ -114,10 +116,11 @@ func (fs *FileSchema) decryptStream() (err error) {
 			if err != nil {
 				if errors.Is(err, xbcrypt.ErrExceedExtractSize) {
 					// copy the rest of the stream to discard
+					err = fmt.Errorf("partially decrypted to limit size  %d", fs.ExtractLimitSize)
 				} else {
 					err = fmt.Errorf("failed to process chunks: %w", err)
 				}
-				_, _ = io.Copy(io.Discard, fs.StreamOut)
+				_, _ = io.Copy(fs.OutputWriter, fs.StreamOut)
 			}
 			if fs.MidPipeIn != nil {
 				_ = fs.MidPipeIn.Close()
@@ -126,17 +129,10 @@ func (fs *FileSchema) decryptStream() (err error) {
 
 		var writer io.Writer
 		if fs.DecompressMethod == "qp" {
-			if fs.MidPipeIn == nil {
-				return fmt.Errorf("MidPipeIn is nil for qp decompression")
-			}
 			writer = fs.MidPipeIn
 		} else {
-			if fs.OutputWriter == nil {
-				return fmt.Errorf("OutputWriter is nil")
-			}
 			writer = fs.OutputWriter
 		}
-
 		decryptContext, err := xbcrypt.NewDecryptContext(
 			fs.EncryptKey, fs.StreamOut, writer, fs.ExtractLimitSize)
 		if err != nil {
@@ -145,23 +141,7 @@ func (fs *FileSchema) decryptStream() (err error) {
 		err = decryptContext.ProcessChunks()
 		return err
 	case "":
-		// 未加密，直接转发到下一阶段
-		if fs.DecompressMethod == "qp" {
-			// 需要解压缩，创建中间管道
-			fs.MidPipeOut, fs.MidPipeIn = io.Pipe()
-			go func() {
-				defer fs.MidPipeIn.Close()
-				_, _ = io.Copy(fs.MidPipeIn, fs.StreamOut)
-			}()
-		} else {
-			// 无需解压缩，直接复制到输出
-			if fs.OutputWriter == nil {
-				return fmt.Errorf("OutputWriter is nil")
-			}
-			go func() {
-				_, _ = io.Copy(fs.OutputWriter, fs.StreamOut)
-			}()
-		}
+		// no decrypt
 		return nil
 	default:
 		return fmt.Errorf("unsupported decrypt method %s", fs.DecryptMethod)
@@ -180,10 +160,8 @@ func (fs *FileSchema) decompressStream() (err error) {
 
 		var isPartial bool
 		defer func() {
-			if err != nil {
-				_, _ = io.Copy(io.Discard, fs.MidPipeOut)
-			} else if isPartial {
-				_, err = io.Copy(io.Discard, fs.MidPipeOut)
+			if err == nil && isPartial {
+				err = fmt.Errorf("partially decompressed to limit size  %d", fs.ExtractLimitSize)
 			}
 		}()
 		qpressFile := &qpress.ArchiveFile{}
@@ -193,7 +171,7 @@ func (fs *FileSchema) decompressStream() (err error) {
 			return err
 		}
 	case "":
-		// 无需解压缩，已在解密阶段处理
+		// no decompress
 		return nil
 	default:
 		return fmt.Errorf("unsupported decompress method %s", fs.DecompressMethod)
@@ -216,7 +194,7 @@ func (fs *FileSchema) ProcessToWriter(writer io.Writer) (err error) {
 	go func() {
 		defer close(done)
 
-		// 解密流
+		// decrypt stream
 		err := fs.decryptStream()
 		if err != nil {
 			fs.DecryptErr = err.Error()
@@ -224,7 +202,7 @@ func (fs *FileSchema) ProcessToWriter(writer io.Writer) (err error) {
 			return
 		}
 
-		// 如果需要解压缩，处理解压缩
+		// if need decompress, process decompress
 		if fs.DecompressMethod == "qp" {
 			err = fs.decompressStream()
 			if err != nil {

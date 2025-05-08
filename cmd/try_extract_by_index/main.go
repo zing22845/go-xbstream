@@ -139,14 +139,9 @@ func main() {
 	startTime := time.Now()
 
 	// 执行提取
-	bytesExtracted, err := index.ExtractFilesByIndex(
-		ctx,
-		*idxFileNamePtr,
-		encryptKey,
+	bytesExtracted, err := index.ExtractFiles(
 		readerPool,
 		*targetDirPtr,
-		*concurrencyPtr,
-		*limitRatePtr,
 	)
 	if err != nil {
 		log.Fatalf("提取文件失败: %v", err)

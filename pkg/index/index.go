@@ -64,6 +64,7 @@ type IndexStream struct {
 	ChunkIndexChan                    chan *ChunkIndex
 	SchemaFileChan                    chan *TableSchema
 	TableSchemaChan                   chan *TableSchema
+	FileSchemaChan                    chan *FileSchema
 	IsParseTableSchema                bool
 	IsIndexDone                       bool
 	IndexFilePath                     string
@@ -74,6 +75,7 @@ type IndexStream struct {
 	IndexFileOffsetFilename           string
 	IndexFileOffsetFileChunkTotalSize int64
 	IndexDB                           *gorm.DB
+	ExtractFilesDone                  chan struct{}
 	IndexTableDone                    chan struct{}
 	IndexTableBatchSize               int
 	ParserSchemaFileDone              chan struct{}
@@ -97,6 +99,7 @@ type IndexStream struct {
 
 func NewIndexStream(
 	ctx context.Context,
+	concurrency int,
 	indexFilename string,
 	baseDIR string,
 	mysqlVersion string,
@@ -113,14 +116,16 @@ func NewIndexStream(
 	i := &IndexStream{
 		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
 		IndexFilename:        indexFilename,
-		ChunkIndexChan:       make(chan *ChunkIndex, 100),
-		TableSchemaChan:      make(chan *TableSchema, 100),
-		SchemaFileChan:       make(chan *TableSchema, 100),
+		ChunkIndexChan:       make(chan *ChunkIndex, concurrency),
+		FileSchemaChan:       make(chan *FileSchema, concurrency),
+		TableSchemaChan:      make(chan *TableSchema, concurrency),
+		SchemaFileChan:       make(chan *TableSchema, concurrency),
+		ExtractFilesDone:     make(chan struct{}, 1),
 		IndexTableDone:       make(chan struct{}, 1),
-		IndexTableBatchSize:  100,
+		IndexTableBatchSize:  concurrency,
 		ParserSchemaFileDone: make(chan struct{}, 1),
 		SchemaTableDone:      make(chan struct{}, 1),
-		SchemaTableBatchSize: 100,
+		SchemaTableBatchSize: concurrency,
 		MySQLServer: &MySQLServer{
 			MySQLVersion: mysqlVersion,
 		},
@@ -607,7 +612,8 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	} else {
 		tx = i.IndexDB.
 			Where(likeCondition, likePathsInterface...).
-			Where(notLikeCondition, notLikePathsInterface...)
+			Where(notLikeCondition, notLikePathsInterface...).
+			Order("filepath, pay_offset ASC")
 	}
 	tx.Find(&indices)
 	if tx.Error != nil {
@@ -619,7 +625,99 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	}
 }
 
-func (i *IndexStream) ExtractSchemas(rsp *readseekerpool.ReadSeekerPool, targetDIR string, likePaths, notLikePaths []string) {
+func (i *IndexStream) ExtractSingleFile(
+	rs io.ReadSeeker,
+	filepath string,
+	targetDIR string,
+) (n int64, err error) {
+	likePaths := []string{filepath}
+	go i.getChunkIndecis(likePaths, nil, false)
+	for ci := range i.ChunkIndexChan {
+		ci.DecodeFilepath()
+		fileSchema, err := NewFileSchema(
+			ci.Filepath,
+			0,
+			nil,
+			"",
+			"",
+			"",
+			"",
+		)
+		if err != nil {
+			i.Err = err
+			return 0, err
+		}
+		i.FileSchemaChan <- fileSchema
+	}
+	return
+}
+
+func (i *IndexStream) ExtractFiles(
+	rsp *readseekerpool.ReadSeekerPool,
+	concurrency int,
+	targetDIR string,
+	likePaths, notLikePaths []string,
+) {
+	// extract index file
+	i.ExtractIndexFile(rsp, targetDIR)
+	if i.Err != nil {
+		return
+	}
+	// connect sqlite index db
+	i.ConnectIndexDB()
+	if i.Err != nil {
+		return
+	}
+	defer i.CloseIndexDB()
+
+	// get first chunk_indices
+	go i.getChunkIndecis(likePaths, notLikePaths, true)
+
+	// extract files from index stream
+	var wg sync.WaitGroup
+	var totalSize atomic.Int64
+	for ci := range i.ChunkIndexChan {
+		ci.EncryptKey = i.EncryptKey
+		ci.ExtractLimitSize = i.ExtractLimitSize
+		wg.Add(1)
+		go func(ci *ChunkIndex) {
+			defer wg.Done()
+			rs, err := rsp.Get()
+			if err != nil {
+				i.Err = err
+				return
+			}
+			defer rsp.Put(rs)
+			ci.DecodeFilepath()
+			subStream := NewIndexStream(
+				i.CTX,
+				concurrency,
+				i.IndexFilename,
+				targetDIR,
+				"",    // MySQL version not needed for extraction
+				false, // Don't remove local index file
+				i.EncryptKey,
+				0,   // No extract limit size
+				nil, // No MySQL connection
+				nil, // No Meilisearch index
+				nil, // No Meilisearch default doc
+			)
+			n, err := subStream.ExtractSingleFile(rs, ci.Filepath, targetDIR)
+			if err != nil {
+				i.Err = err
+			}
+			totalSize.Add(n)
+		}(ci)
+	}
+	wg.Wait()
+	<-i.ExtractFilesDone
+}
+
+func (i *IndexStream) ExtractSchemas(
+	rsp *readseekerpool.ReadSeekerPool,
+	targetDIR string,
+	likePaths, notLikePaths []string,
+) {
 	// extract index file
 	i.ExtractIndexFile(rsp, targetDIR)
 	if i.Err != nil {
