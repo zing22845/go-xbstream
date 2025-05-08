@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/zing22845/go-xbstream/pkg/xbstream"
@@ -454,6 +456,9 @@ func extractFileWorker(
 		fileSize += n
 	}
 
+	// 确保关闭StreamIn，通知处理已完成
+	fileSchema.StreamIn.Close()
+
 	// 从 FileSchema 的输出流读取处理后的数据并写入目标文件
 	processedSize, err := io.Copy(writer, fileSchema.ParseOut)
 	if err != nil {
@@ -548,6 +553,10 @@ func ExtractFilesByIndex(
 		concurrency = 10 // 默认并发数
 	}
 
+	// 创建一个带超时的上下文
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*60*time.Second) // 30分钟超时
+	defer cancel()
+
 	// 创建信号量来限制并发数
 	sem := make(chan struct{}, concurrency)
 
@@ -558,7 +567,7 @@ func ExtractFilesByIndex(
 	}
 
 	// 设置 IndexStream
-	indexStream, err := setupIndexStream(ctx, idxFileName, targetDIR, encryptKey, rsp)
+	indexStream, err := setupIndexStream(ctxWithTimeout, idxFileName, targetDIR, encryptKey, rsp)
 	if err != nil {
 		return 0, err
 	}
@@ -580,20 +589,35 @@ func ExtractFilesByIndex(
 	var wg sync.WaitGroup
 	var totalSize atomic.Int64
 	errorChan := make(chan error, concurrency) // 增大错误通道容量
+	totalFiles := len(filePaths)
+	processedFiles := atomic.Int32{}
 
 	// 处理文件
-	for _, filePath := range filePaths {
+	for fileIndex, filePath := range filePaths {
+		// 定期输出进度
+		if fileIndex > 0 && fileIndex%10 == 0 {
+			fmt.Printf("Processing file %d of %d (%.1f%%)\n",
+				fileIndex, totalFiles, float64(fileIndex)/float64(totalFiles)*100)
+		}
+
 		// 使用信号量控制并发数
 		select {
 		case sem <- struct{}{}: // 获取信号量，如果已满则阻塞
-		case <-ctx.Done(): // 如果上下文被取消，则退出
-			return 0, ctx.Err()
+		case <-ctxWithTimeout.Done(): // 如果上下文被取消，则退出
+			return 0, ctxWithTimeout.Err()
 		}
 
 		wg.Add(1)
-		go func(filePath string) {
+		go func(filePath string, fileIndex int) {
 			defer wg.Done()
-			defer func() { <-sem }() // 释放信号量
+			defer func() {
+				<-sem // 释放信号量
+				newProcessed := processedFiles.Add(1)
+				if newProcessed%5 == 0 {
+					fmt.Printf("Completed %d of %d files (%.1f%%)\n",
+						newProcessed, totalFiles, float64(newProcessed)/float64(totalFiles)*100)
+				}
+			}()
 
 			// 获取第一个块作为代表
 			chunks := fileChunksMap[filePath]
@@ -606,15 +630,16 @@ func ExtractFilesByIndex(
 			fileSize, err := extractFileWorker(ci, indexStream, rsp, targetDIR, rateLimiter)
 			if err != nil {
 				select {
-				case errorChan <- err:
+				case errorChan <- errors.Wrapf(err, "processing file %s (index %d)", filePath, fileIndex):
 				default:
 					// 如果通道已满，记录错误但不阻塞
+					fmt.Printf("Error processing file %s (index %d): %v\n", filePath, fileIndex, err)
 				}
 				return
 			}
 
 			totalSize.Add(fileSize)
-		}(filePath)
+		}(filePath, fileIndex)
 	}
 
 	// 等待所有工作完成或出错
@@ -635,8 +660,9 @@ func ExtractFilesByIndex(
 				return 0, err
 			}
 		}
-	case <-ctx.Done():
-		return 0, ctx.Err()
+		fmt.Printf("All %d files processed successfully\n", totalFiles)
+	case <-ctxWithTimeout.Done():
+		return 0, errors.Wrap(ctxWithTimeout.Err(), "operation timed out or was cancelled")
 	}
 
 	return totalSize.Load(), nil
