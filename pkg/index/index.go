@@ -616,6 +616,8 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 		i.Err = fmt.Errorf("get chunk_indices rows error: %w", tx.Error)
 	}
 	for _, ci := range indices {
+		ci.EncryptKey = i.EncryptKey
+		ci.ExtractLimitSize = i.ExtractLimitSize
 		ci.DecodeFilepath()
 		i.ChunkIndexChan <- ci
 		if i.Err != nil {
@@ -673,9 +675,6 @@ func (i *IndexStream) ExtractSingleFile(
 	// read chunks and write to fileSchema's streamIn
 	go func(fileSchema *FileSchema) {
 		for subCi := range i.ChunkIndexChan {
-			subCi.EncryptKey = ci.EncryptKey
-			subCi.ExtractLimitSize = ci.ExtractLimitSize
-			subCi.DecodeFilepath()
 			_, err = rs.Seek(subCi.StartPosition, io.SeekStart)
 			if err != nil {
 				i.Err = err
@@ -746,9 +745,6 @@ func (i *IndexStream) ExtractFiles(
 				return
 			}
 			defer rsp.Put(rs)
-			ci.EncryptKey = i.EncryptKey
-			ci.ExtractLimitSize = i.ExtractLimitSize
-			ci.DecodeFilepath()
 			subStream := NewIndexStream(
 				i.CTX,
 				concurrency,
@@ -824,8 +820,6 @@ func (i *IndexStream) ExtractSchemas(
 			i.Err = err
 			return
 		}
-		ci.EncryptKey = i.EncryptKey
-		ci.ExtractLimitSize = i.ExtractLimitSize
 		wg.Add(1)
 		go func(ci *ChunkIndex, rs io.ReadSeeker) {
 			defer wg.Done()
