@@ -633,7 +633,6 @@ func (i *IndexStream) ExtractSingleFile(
 	if err != nil {
 		return 0, err
 	}
-	log.Infof("create dir success: %s", baseDir)
 	// create target file
 	targetFile, err := os.Create(targetFilePath)
 	if err != nil {
@@ -657,7 +656,6 @@ func (i *IndexStream) ExtractSingleFile(
 		return 0, err
 	}
 	defer fileSchema.StreamIn.Close()
-	log.Infof("create file schema success: %s", fileSchema.Filepath)
 
 	// connect sqlite index db
 	i.ConnectIndexDB()
@@ -699,10 +697,9 @@ func (i *IndexStream) ExtractSingleFile(
 				return
 			}
 		}
-		log.Infof("read chunks success: %s", fileSchema.Filepath)
 		// close streamIn
 		fileSchema.StreamIn.Close()
-		log.Infof("close streamIn success: %s", fileSchema.Filepath)
+		log.Infof("write file success: %s", ci.OriginalFilepath)
 	}(fileSchema)
 	return fileSchema.ProcessToWriter(targetFile)
 }

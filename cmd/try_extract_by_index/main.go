@@ -38,7 +38,6 @@ func main() {
 	targetDirPtr := flag.String("target-dir", "./extracted", "提取文件的目标目录")
 	concurrencyPtr := flag.Int("concurrency", 4, "并发数")
 	limitRatePtr := flag.Uint64("limit-rate", 0, "限速(字节/秒), 0表示不限速")
-	readerPoolSizePtr := flag.Int("reader-pool-size", 10, "读取器池大小")
 
 	// 解析命令行参数
 	flag.Parse()
@@ -111,7 +110,7 @@ func main() {
 
 	readerPool, err := readseekerpool.NewReadSeekerPool(
 		"s3",
-		*readerPoolSizePtr,
+		*concurrencyPtr,
 		s3Client,
 		*bucketPtr,
 		keys)
