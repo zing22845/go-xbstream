@@ -74,7 +74,6 @@ type IndexStream struct {
 	IndexFileOffsetFilename           string
 	IndexFileOffsetFileChunkTotalSize int64
 	IndexDB                           *gorm.DB
-	ExtractFilesDone                  chan struct{}
 	IndexTableDone                    chan struct{}
 	IndexTableBatchSize               int
 	ParserSchemaFileDone              chan struct{}
@@ -118,7 +117,6 @@ func NewIndexStream(
 		ChunkIndexChan:       make(chan *ChunkIndex, concurrency),
 		TableSchemaChan:      make(chan *TableSchema, concurrency),
 		SchemaFileChan:       make(chan *TableSchema, concurrency),
-		ExtractFilesDone:     make(chan struct{}, 1),
 		IndexTableDone:       make(chan struct{}, 1),
 		IndexTableBatchSize:  concurrency,
 		ParserSchemaFileDone: make(chan struct{}, 1),
@@ -629,7 +627,7 @@ func (i *IndexStream) ExtractSingleFile(
 	targetDIR string,
 ) (n int64, err error) {
 	// create base dir
-	targetFilePath := filepath.Join(targetDIR, ci.Filepath)
+	targetFilePath := filepath.Join(targetDIR, ci.OriginalFilepath)
 	baseDir := filepath.Dir(targetFilePath)
 	err = os.MkdirAll(baseDir, 0755)
 	if err != nil {
@@ -701,6 +699,10 @@ func (i *IndexStream) ExtractSingleFile(
 				return
 			}
 		}
+		log.Infof("read chunks success: %s", fileSchema.Filepath)
+		// close streamIn
+		fileSchema.StreamIn.Close()
+		log.Infof("close streamIn success: %s", fileSchema.Filepath)
 	}(fileSchema)
 	return fileSchema.ProcessToWriter(targetFile)
 }
@@ -762,7 +764,6 @@ func (i *IndexStream) ExtractFiles(
 		}(ci)
 	}
 	wg.Wait()
-	<-i.ExtractFilesDone
 	return totalSize, i.Err
 }
 

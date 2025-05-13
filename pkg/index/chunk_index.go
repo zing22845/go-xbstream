@@ -20,6 +20,7 @@ type ChunkIndex struct {
 	DecompressedFileType string          `gorm:"-"`
 	DecompressMethod     string          `gorm:"-"`
 	ExtractLimitSize     int64           `gorm:"-"`
+	OriginalFilepath     string          `gorm:"-"`
 	Chunk                *xbstream.Chunk `gorm:"-"`
 }
 
@@ -36,6 +37,7 @@ func (ci *ChunkIndex) DecodeFilepath() {
 		ci.DecryptedFileType = ext
 		ci.DecompressMethod = "qp"
 		ci.DecompressedFileType = filepath.Ext(ci.Filepath[:len(ci.Filepath)-len(ext)])
+		ci.OriginalFilepath = ci.Filepath[:len(ci.Filepath)-len(ext)]
 	case ".xbcrypt":
 		ci.DecryptMethod = "xbcrypt"
 		ci.DecryptedFileType = filepath.Ext(ci.Filepath[:len(ci.Filepath)-len(ext)])
@@ -43,14 +45,17 @@ func (ci *ChunkIndex) DecodeFilepath() {
 			ci.DecompressMethod = "qp"
 			ci.DecompressedFileType = filepath.Ext(
 				ci.Filepath[:len(ci.Filepath)-len(ext)-len(ci.DecryptedFileType)])
+			ci.OriginalFilepath = ci.Filepath[:len(ci.Filepath)-len(ext)-len(ci.DecryptedFileType)]
 		} else {
 			ci.DecompressMethod = ""
 			ci.DecompressedFileType = ci.DecryptedFileType
+			ci.OriginalFilepath = ci.Filepath[:len(ci.Filepath)-len(ext)]
 		}
 	default:
 		ci.DecryptMethod = ""
 		ci.DecryptedFileType = ext
 		ci.DecompressMethod = ""
 		ci.DecompressedFileType = ext
+		ci.OriginalFilepath = ci.Filepath
 	}
 }
