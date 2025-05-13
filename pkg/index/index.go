@@ -704,7 +704,11 @@ func (i *IndexStream) ExtractSingleFile(
 			}
 		}
 		// close streamIn
-		fileSchema.StreamIn.Close()
+		err = fileSchema.StreamIn.Close()
+		if err != nil {
+			i.Err = err
+			return
+		}
 		if i.Err != nil {
 			log.Infof("write file %s with error: %s", ci.OriginalFilepath, i.Err)
 			return
