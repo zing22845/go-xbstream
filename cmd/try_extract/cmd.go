@@ -1,195 +1,192 @@
 package main
 
 import (
-	"encoding/binary"
-	"hash/crc32"
-	"io"
+	"context"
+	"crypto/tls"
+	"flag"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/zing22845/go-qpress"
-	"github.com/zing22845/go-xbstream/pkg/xbstream"
-
-	"github.com/zing22845/go-xbstream/internal/utils"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zing22845/go-xbstream/pkg/index"
+	"github.com/zing22845/readseekerpool"
 )
 
-type qpFile struct {
-	qpress  *qpress.ArchiveFile
-	pipeIn  *io.PipeWriter
-	pipeOut *io.PipeReader
-}
-
-type normalFile struct {
-	file        *os.File
-	writtenSize int64
-}
-
 func main() {
-	if len(os.Args) < 3 {
-		log.Fatalf("usage: ./main [xbstream file path]")
-		os.Exit(1)
-	}
-	// try to open xbstream file
-	filePath := os.Args[1]
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Fatalf("failed to open file %q: %v\n", filePath, err)
-		os.Exit(1)
-	}
-	defer file.Close()
+	// 定义命令行参数
+	endpointPtr := flag.String("endpoint", "", "S3兼容存储的端点")
+	regionPtr := flag.String("region", "", "S3存储区域")
+	accessKeyPtr := flag.String("access-key", "", "S3访问密钥")
+	secretKeyPtr := flag.String("secret-key", "", "S3秘密密钥")
+	bucketPtr := flag.String("bucket", "", "S3桶名称")
+	objectKeysPtr := flag.String("objects", "", "S3对象键列表(文件路径，用逗号分隔)")
 
-	// test if target dir exists or create it
-	targetDIR := os.Args[2]
-	fi, err := os.Stat(targetDIR)
+	// ExtractFilesByIndex参数
+	idxFileNamePtr := flag.String("index-file", "package.tar.gz.db", "索引文件名")
+	encryptKeyPtr := flag.String("encrypt-key", "", "加密密钥(如果有)")
+	targetDirPtr := flag.String("target-dir", "./extracted", "提取文件的目标目录")
+	concurrencyPtr := flag.Int("concurrency", 4, "并发数")
+	limitRatePtr := flag.Uint64("limit-rate", 0, "限速(字节/秒), 0表示不限速")
+	readerPoolSizePtr := flag.Int("reader-pool-size", 10, "读取器池大小")
+
+	// 解析命令行参数
+	flag.Parse()
+
+	// 检查必须的参数
+	if *accessKeyPtr == "" || *secretKeyPtr == "" || *bucketPtr == "" || *objectKeysPtr == "" {
+		fmt.Println("必须提供access-key, secret-key, bucket和objects参数")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// 创建目标目录
+	err := os.MkdirAll(*targetDirPtr, 0755)
 	if err != nil {
-		if err != os.ErrNotExist {
-			log.Fatalf("failed to stat target %q: %v\n", targetDIR, err)
-			os.Exit(1)
-		}
-		// create target dir
-		err = os.MkdirAll(targetDIR, 07555)
-		if err != nil {
-			log.Fatalf("failed to mkdirall for %s:%v\n", targetDIR, err)
-			os.Exit(1)
+		log.Fatalf("创建目标目录失败: %v", err)
+	}
+
+	// 创建用于取消操作的上下文
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 设置信号处理，优雅退出
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-signalChan
+		fmt.Println("\n接收到退出信号，正在清理...")
+		cancel()
+	}()
+
+	var httpClient *http.Client
+	if strings.HasPrefix(*endpointPtr, "https://") {
+		httpClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
 		}
 	} else {
-		if !fi.IsDir() {
-			log.Fatalf("target %s is not a directory\n", targetDIR)
-			os.Exit(1)
-		}
+		httpClient = http.DefaultClient
+	}
+	cfg, err := config.LoadDefaultConfig(
+		context.Background(),
+		config.WithHTTPClient(httpClient),
+		config.WithRegion(*regionPtr),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				*accessKeyPtr,
+				*secretKeyPtr,
+				"")),
+	)
+	if err != nil {
+		fmt.Println("config s3 error:", err)
+		return
 	}
 
-	// set decrypt key
-	encryptKey := ""
-	if len(os.Args) > 3 {
-		encryptKey = os.Args[3]
+	customResolver := func(options *s3.Options) {
+		options.BaseEndpoint = aws.String(*endpointPtr)
+		options.UsePathStyle = false
+		options.EndpointOptions.DisableHTTPS = false
+		options.Retryer = retry.NewStandard(func(so *retry.StandardOptions) {
+			so.MaxAttempts = 5
+		})
+	}
+	s3Client := s3.NewFromConfig(cfg, customResolver)
+
+	keys := strings.Split(*objectKeysPtr, ",")
+	for i, key := range keys {
+		keys[i] = strings.TrimSpace(key)
 	}
 
-	files := make(map[string]interface{})
-	failedChunks := make([]*index.ChunkIndex, 0)
+	readerPool, err := readseekerpool.NewReadSeekerPool(
+		"s3",
+		*readerPoolSizePtr,
+		s3Client,
+		*bucketPtr,
+		keys)
 
-	// extract the xbstream
-	xr := xbstream.NewReader(file)
-	var offset int64
-	for {
-		chunk, err := xr.Next()
-		offset += int64(chunk.ReadSize)
+	// 准备加密密钥
+	var encryptKey []byte
+	if *encryptKeyPtr != "" {
+		encryptKey = []byte(*encryptKeyPtr)
+	}
+
+	// 打印开始提取信息
+	fmt.Printf("开始从S3提取文件:\n")
+	fmt.Printf("- 端点: %s\n", *endpointPtr)
+	fmt.Printf("- 桶: %s\n", *bucketPtr)
+	fmt.Printf("- 对象列表: %s\n", *objectKeysPtr)
+	fmt.Printf("- 索引文件: %s\n", *idxFileNamePtr)
+	fmt.Printf("- 目标目录: %s\n", *targetDirPtr)
+	fmt.Printf("- 并发数: %d\n", *concurrencyPtr)
+	if *limitRatePtr > 0 {
+		fmt.Printf("- 限速: %d 字节/秒\n", *limitRatePtr)
+	} else {
+		fmt.Printf("- 限速: 无\n")
+	}
+
+	startTime := time.Now()
+
+	// 创建index stream
+	indexStream := index.NewIndexStream(
+		ctx,
+		*concurrencyPtr,
+		*idxFileNamePtr,
+		*targetDirPtr,
+		"",
+		false,
+		encryptKey,
+		0,
+		nil,
+		nil,
+		nil,
+	)
+
+	// 执行提取
+	totalSize, err := indexStream.ExtractFiles(
+		readerPool,
+		*concurrencyPtr,
+		*targetDirPtr,
+		nil,
+		nil,
+	)
+	if indexStream.Err != nil {
+		log.Fatalf("提取文件失败: %v", err)
+	}
+
+	// 计算并打印统计信息
+	duration := time.Since(startTime)
+	bytesPerSecond := float64(totalSize) / duration.Seconds()
+
+	fmt.Printf("\n提取完成:\n")
+	fmt.Printf("- 耗时: %v\n", duration)
+	fmt.Printf("- 提取: %.2f MB\n", float64(totalSize)/(1024*1024))
+	fmt.Printf("- 平均速度: %.2f MB/s\n", bytesPerSecond/(1024*1024))
+
+	// 列出提取的文件
+	fmt.Println("\n提取的文件:")
+	err = filepath.Walk(*targetDirPtr, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Printf("read chunk header failed at offset: %d\n", offset)
-			offset, err = utils.FindNextBytes(file, offset, xbstream.ChunkMagic)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				log.Fatalf("failed to find magic until offset: %d, error %v\n", offset, err)
-				os.Exit(1)
-			} else {
-				log.Printf("found new header at offset: %d\n", offset)
-				continue
-			}
-			log.Fatalf("read next chunk failed: %v\n", err)
-			break
+			return err
 		}
-
-		fPath := string(chunk.Path)
-		f, ok := files[fPath]
-		if !ok {
-			newFPath := filepath.Join(targetDIR, fPath)
-			newFDIR := filepath.Dir(newFPath)
-			if err = os.MkdirAll(newFDIR, 0777); err != nil {
-				log.Fatalf("create directory of %s failed: %v\n", newFPath, err)
-				break
-			}
-			if strings.HasSuffix(fPath, ".qp") {
-				pipeOut, pipeIn := io.Pipe()
-				qpF := &qpFile{
-					qpress:  &qpress.ArchiveFile{},
-					pipeIn:  pipeIn,
-					pipeOut: pipeOut,
-				}
-				go func() {
-					defer io.Copy(io.Discard, qpF.pipeOut)
-					_, err := qpF.qpress.Decompress(qpF.pipeOut, newFDIR, 0)
-					if err != nil {
-						log.Printf("decompress %s failed: %v\n", fPath, err)
-					}
-				}()
-				f = qpF
-			} else {
-				normalFile := &normalFile{}
-				normalFile.file, err = os.OpenFile(newFPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
-				if err != nil {
-					log.Fatalf("open file %s failed: %v\n", newFPath, err)
-					break
-				}
-				f = normalFile
-			}
-			files[fPath] = f
+		if !info.IsDir() {
+			relPath, _ := filepath.Rel(*targetDirPtr, path)
+			fmt.Printf("- %s (%.2f MB)\n", relPath, float64(info.Size())/(1024*1024))
 		}
-
-		payLen := int64(chunk.PayLen)
-		var w io.Writer
-		switch tf := f.(type) {
-		case *qpFile:
-			if chunk.Type == xbstream.ChunkTypeEOF {
-				tf.pipeIn.Close()
-				continue
-			}
-			w = tf.pipeIn
-		case *normalFile:
-			if chunk.Type == xbstream.ChunkTypeEOF {
-				tf.file.Close()
-				continue
-			}
-			_, err = tf.file.Seek(int64(chunk.PayOffset), io.SeekStart)
-			if err != nil {
-				log.Fatalf("seek file %s failed: %v\n", fPath, err)
-				break
-			}
-			w = tf.file
-		}
-		crc32Hash := crc32.NewIEEE()
-
-		tReader := io.TeeReader(chunk, crc32Hash)
-
-		_, err = io.CopyN(w, tReader, payLen)
-		if err != nil {
-			log.Fatalf("write data into file %s failed: %v\n", fPath, err)
-			break
-		}
-		offset += payLen
-		if chunk.Checksum != binary.BigEndian.Uint32(crc32Hash.Sum(nil)) {
-			ci := &index.ChunkIndex{
-				Filepath:      fPath,
-				StartPosition: offset - payLen - int64(chunk.HeaderSize),
-				EndPosition:   offset,
-				EncryptKey:    []byte(encryptKey),
-			}
-			failedChunks = append(failedChunks, ci)
-			continue
-		}
-		switch tf := f.(type) {
-		case *qpFile:
-		case *normalFile:
-			if uint64(tf.writtenSize) != chunk.PayOffset {
-				log.Printf("file %s written size not match pay offset: %d != %d, maybe previous chunk header break\n",
-					fPath, tf.writtenSize, chunk.PayOffset)
-				continue
-			}
-			tf.writtenSize += payLen
-		}
-	}
-	// log failed files
-	if len(failedChunks) > 0 {
-		for _, ci := range failedChunks {
-			log.Printf("checksum failed for '%s', chunk start offset: %d\n", ci.Filepath, ci.StartPosition)
-		}
-		os.Exit(1)
+		return nil
+	})
+	if err != nil {
+		log.Printf("列出提取的文件失败: %v", err)
 	}
 }
