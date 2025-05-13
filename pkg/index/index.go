@@ -762,6 +762,7 @@ func (i *IndexStream) ExtractFiles(
 			)
 			n, err := subStream.ExtractSingleFile(rs, ci, targetDIR)
 			if err != nil {
+				i.closeChunkIndexChan()
 				i.Err = err
 			}
 			atomic.AddInt64(&totalSize, n)
