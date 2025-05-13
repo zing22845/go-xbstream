@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"crypto/aes"
 	"fmt"
 	"io"
@@ -14,25 +15,27 @@ import (
 
 type FileSchema struct {
 	gorm.Model
-	Filepath             string         `gorm:"column:filepath;type:varchar(4096);uniqueIndex:uk_filepath"`
-	DecryptErr           string         `gorm:"column:decrypt_err;type:text"`
-	DecompressErr        string         `gorm:"column:decompress_err;type:text"`
-	ExtractLimitSize     int64          `gorm:"-"`
-	DecryptMethod        string         `gorm:"-"`
-	DecryptedFileType    string         `gorm:"-"`
-	DecryptedFilepath    string         `gorm:"-"`
-	DecompressMethod     string         `gorm:"-"`
-	DecompressedFileType string         `gorm:"-"`
-	DecompressedFilepath string         `gorm:"-"`
-	StreamIn             *io.PipeWriter `gorm:"-"`
-	StreamOut            *io.PipeReader `gorm:"-"`
-	EncryptKey           []byte         `gorm:"-"`
-	MidPipeIn            *io.PipeWriter `gorm:"-"`
-	MidPipeOut           *io.PipeReader `gorm:"-"`
-	OutputWriter         io.Writer      `gorm:"-"`
+	Filepath             string          `gorm:"column:filepath;type:varchar(4096);uniqueIndex:uk_filepath"`
+	DecryptErr           string          `gorm:"column:decrypt_err;type:text"`
+	DecompressErr        string          `gorm:"column:decompress_err;type:text"`
+	CTX                  context.Context `gorm:"-"`
+	ExtractLimitSize     int64           `gorm:"-"`
+	DecryptMethod        string          `gorm:"-"`
+	DecryptedFileType    string          `gorm:"-"`
+	DecryptedFilepath    string          `gorm:"-"`
+	DecompressMethod     string          `gorm:"-"`
+	DecompressedFileType string          `gorm:"-"`
+	DecompressedFilepath string          `gorm:"-"`
+	StreamIn             *io.PipeWriter  `gorm:"-"`
+	StreamOut            *io.PipeReader  `gorm:"-"`
+	EncryptKey           []byte          `gorm:"-"`
+	MidPipeIn            *io.PipeWriter  `gorm:"-"`
+	MidPipeOut           *io.PipeReader  `gorm:"-"`
+	OutputWriter         io.Writer       `gorm:"-"`
 }
 
 func NewFileSchema(
+	ctx context.Context,
 	filepath string,
 	limitSize int64,
 	encryptKey []byte,
@@ -42,6 +45,7 @@ func NewFileSchema(
 	decompressMethod string,
 ) (fs *FileSchema, err error) {
 	fs = &FileSchema{
+		CTX:                  ctx,
 		Filepath:             filepath,
 		ExtractLimitSize:     limitSize,
 		EncryptKey:           encryptKey,
@@ -163,6 +167,7 @@ func (fs *FileSchema) decompressStream() (err error) {
 				err = fmt.Errorf("partially decompressed to limit size  %d", fs.ExtractLimitSize)
 			}
 		}()
+
 		qpressFile := &qpress.ArchiveFile{}
 		isPartial, err = qpressFile.DecompressStream(
 			fs.MidPipeOut, fs.OutputWriter, fs.ExtractLimitSize)
@@ -211,12 +216,16 @@ func (fs *FileSchema) ProcessToWriter(writer io.Writer) (n int64, err error) {
 		}
 	}()
 
-	// 等待处理完成或出错
+	// 等待处理完成、出错或context取消
 	select {
 	case err := <-errChan:
 		return 0, err
 	case bytesWritten := <-doneChan:
 		return bytesWritten, nil
+	case <-fs.CTX.Done():
+		// Context已取消，清理资源并返回错误
+		fs.CloseAllPipes()
+		return 0, fs.CTX.Err()
 	}
 }
 

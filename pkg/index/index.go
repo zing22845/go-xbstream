@@ -644,6 +644,7 @@ func (i *IndexStream) ExtractSingleFile(
 	// create file schema
 	var fileSchema *FileSchema
 	fileSchema, err = NewFileSchema(
+		i.CTX,
 		ci.Filepath,
 		ci.ExtractLimitSize,
 		ci.EncryptKey,
@@ -660,7 +661,7 @@ func (i *IndexStream) ExtractSingleFile(
 	// connect sqlite index db
 	i.ConnectIndexDB()
 	if i.Err != nil {
-		return
+		return 0, i.Err
 	}
 	defer i.CloseIndexDB()
 
@@ -675,30 +676,35 @@ func (i *IndexStream) ExtractSingleFile(
 			_, err = rs.Seek(subCi.StartPosition, io.SeekStart)
 			if err != nil {
 				i.Err = err
+				break
 			}
 			xr := xbstream.NewReader(rs)
 			// decode chunk header
 			header, err := DecodeChunkHeader(xr)
 			if err != nil {
 				if err == io.EOF {
-					return
+					break
 				}
 				i.Err = err
-				return
+				break
 			}
 			if subCi.PayOffset != header.PayOffset {
 				i.Err = fmt.Errorf("chunk pay offset not equal to chunk index pay offset")
-				return
+				break
 			}
 			payLen := int64(header.PayLen)
 			_, err = io.CopyN(fileSchema.StreamIn, xr, payLen)
 			if err != nil {
 				i.Err = err
-				return
+				break
 			}
 		}
 		// close streamIn
 		fileSchema.StreamIn.Close()
+		if i.Err != nil {
+			log.Infof("write file %s with error: %s", ci.OriginalFilepath, i.Err)
+			return
+		}
 		log.Infof("write file success: %s", ci.OriginalFilepath)
 	}(fileSchema)
 	return fileSchema.ProcessToWriter(targetFile)
