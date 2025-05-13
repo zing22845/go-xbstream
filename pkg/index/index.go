@@ -661,9 +661,15 @@ func (i *IndexStream) ExtractSingleFile(
 	defer fileSchema.StreamIn.Close()
 	log.Infof("create file schema success: %s", fileSchema.Filepath)
 
+	// connect sqlite index db
+	i.ConnectIndexDB()
+	if i.Err != nil {
+		return
+	}
+	defer i.CloseIndexDB()
+
 	// get chunk_indices
-	likePaths := []string{ci.Filepath}
-	go i.getChunkIndecis(likePaths, nil, false)
+	go i.getChunkIndecis([]string{ci.Filepath}, nil, false)
 	// read chunks and write to fileSchema's streamIn
 	go func(fileSchema *FileSchema) {
 		for subCi := range i.ChunkIndexChan {
