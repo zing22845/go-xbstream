@@ -618,6 +618,9 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	for _, ci := range indices {
 		ci.DecodeFilepath()
 		i.ChunkIndexChan <- ci
+		if i.Err != nil {
+			return
+		}
 	}
 }
 
