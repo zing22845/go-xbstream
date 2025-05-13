@@ -167,11 +167,11 @@ func main() {
 
 	// 计算并打印统计信息
 	duration := time.Since(startTime)
-	bytesPerSecond := float64(totalSize.Load()) / duration.Seconds()
+	bytesPerSecond := float64(totalSize) / duration.Seconds()
 
 	fmt.Printf("\n提取完成:\n")
 	fmt.Printf("- 耗时: %v\n", duration)
-	fmt.Printf("- 提取: %.2f MB\n", float64(totalSize.Load())/(1024*1024))
+	fmt.Printf("- 提取: %.2f MB\n", float64(totalSize)/(1024*1024))
 	fmt.Printf("- 平均速度: %.2f MB/s\n", bytesPerSecond/(1024*1024))
 
 	// 列出提取的文件

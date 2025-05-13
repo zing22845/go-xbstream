@@ -654,11 +654,20 @@ func (i *IndexStream) ExtractSingleFile(
 	ci *ChunkIndex,
 	targetDIR string,
 ) (n int64, err error) {
-	// create target file
-	targetFile, err := os.Create(filepath.Join(targetDIR, ci.Filepath))
+	// create base dir
+	targetFilePath := filepath.Join(targetDIR, ci.Filepath)
+	baseDir := filepath.Dir(targetFilePath)
+	err = os.MkdirAll(baseDir, 0755)
 	if err != nil {
 		return 0, err
 	}
+	log.Infof("create dir success: %s", baseDir)
+	// create target file
+	targetFile, err := os.Create(targetFilePath)
+	if err != nil {
+		return 0, err
+	}
+	log.Infof("create file success: %s", targetFilePath)
 	defer targetFile.Close()
 
 	// create file schema
@@ -676,6 +685,7 @@ func (i *IndexStream) ExtractSingleFile(
 		return 0, err
 	}
 	defer fileSchema.StreamIn.Close()
+	log.Infof("create file schema success: %s", fileSchema.Filepath)
 
 	// get chunk_indices
 	likePaths := []string{ci.Filepath}
@@ -720,7 +730,7 @@ func (i *IndexStream) ExtractFiles(
 	concurrency int,
 	targetDIR string,
 	likePaths, notLikePaths []string,
-) (totalSize atomic.Int64, err error) {
+) (totalSize int64, err error) {
 	// extract index file
 	i.ExtractIndexFile(rsp, targetDIR)
 	if i.Err != nil {
@@ -768,7 +778,7 @@ func (i *IndexStream) ExtractFiles(
 			if err != nil {
 				i.Err = err
 			}
-			totalSize.Add(n)
+			atomic.AddInt64(&totalSize, n)
 		}(ci)
 	}
 	wg.Wait()
