@@ -623,32 +623,6 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	}
 }
 
-func (i *IndexStream) ExtractFileByPayload(
-	ci *ChunkIndex,
-	r io.Reader,
-	payLen int64,
-) (n int64, err error) {
-	var fileSchema *FileSchema
-	if ci.PayOffset == 0 {
-		fileSchema, err = NewFileSchema(
-			ci.Filepath,
-			ci.ExtractLimitSize,
-			ci.EncryptKey,
-			ci.DecryptedFileType,
-			ci.DecryptMethod,
-			ci.DecompressedFileType,
-			ci.DecompressMethod,
-		)
-		if err != nil {
-			n, _ = io.CopyN(io.Discard, r, payLen)
-			return n, err
-		}
-		defer fileSchema.StreamIn.Close()
-		return io.CopyN(fileSchema.StreamIn, r, payLen)
-	}
-	return io.CopyN(io.Discard, r, payLen)
-}
-
 func (i *IndexStream) ExtractSingleFile(
 	rs io.ReadSeeker,
 	ci *ChunkIndex,

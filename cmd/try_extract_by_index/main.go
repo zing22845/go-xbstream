@@ -158,7 +158,7 @@ func main() {
 		readerPool,
 		*concurrencyPtr,
 		*targetDirPtr,
-		keys,
+		nil,
 		nil,
 	)
 	if indexStream.Err != nil {
