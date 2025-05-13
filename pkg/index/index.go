@@ -765,6 +765,7 @@ func (i *IndexStream) ExtractFiles(
 			atomic.AddInt64(&totalSize, n)
 		}(ci)
 		if i.Err != nil {
+			log.Errorf("extract file %s with error: %s", ci.OriginalFilepath, i.Err)
 			break
 		}
 	}
