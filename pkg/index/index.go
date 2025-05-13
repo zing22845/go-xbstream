@@ -765,6 +765,9 @@ func (i *IndexStream) ExtractFiles(
 			}
 			atomic.AddInt64(&totalSize, n)
 		}(ci)
+		if i.Err != nil {
+			break
+		}
 	}
 	wg.Wait()
 	return totalSize, i.Err
