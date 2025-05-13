@@ -92,7 +92,6 @@ type IndexStream struct {
 	EncryptKey                        []byte
 	ExtractLimitSize                  int64
 	Conn                              *client.Conn
-	ChunkIndexChanClosed              atomic.Bool // 标记ChunkIndexChan是否已关闭
 	*MySQLServer
 }
 
@@ -143,7 +142,6 @@ func NewIndexStream(
 		ExtractLimitSize:       extractLimitSize,
 		Conn:                   conn,
 	}
-	i.ChunkIndexChanClosed.Store(false)
 	i.prepareParseSchema()
 	i.Offset.Store(0)
 	i.CTX, i.Cancel = context.WithCancel(ctx)
@@ -532,7 +530,7 @@ func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 	for {
 		ci = i.DecodeChunk(xr, ci)
 		if i.Err != nil || i.IsIndexDone {
-			i.closeChunkIndexChan()
+			close(i.ChunkIndexChan)
 			<-i.IndexTableDone
 			close(i.SchemaFileChan)
 			<-i.ParserSchemaFileDone
@@ -546,7 +544,7 @@ func (i *IndexStream) IndexStream(r io.Reader, w io.WriteCloser) {
 func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirstChunk bool) {
 	defer func() {
 		// close channel
-		i.closeChunkIndexChan()
+		close(i.ChunkIndexChan)
 		// send done signal
 		i.IndexTableDone <- struct{}{}
 	}()
@@ -704,11 +702,7 @@ func (i *IndexStream) ExtractSingleFile(
 			}
 		}
 		// close streamIn
-		err = fileSchema.StreamIn.Close()
-		if err != nil {
-			i.Err = err
-			return
-		}
+		fileSchema.StreamIn.Close()
 		if i.Err != nil {
 			log.Infof("write file %s with error: %s", ci.OriginalFilepath, i.Err)
 			return
@@ -766,7 +760,7 @@ func (i *IndexStream) ExtractFiles(
 			)
 			n, err := subStream.ExtractSingleFile(rs, ci, targetDIR)
 			if err != nil {
-				i.closeChunkIndexChan()
+				close(i.ChunkIndexChan)
 				i.Err = err
 			}
 			atomic.AddInt64(&totalSize, n)
@@ -917,18 +911,5 @@ func (i *IndexStream) ExtractIndexFile(rsp *readseekerpool.ReadSeekerPool, targe
 	if err != nil {
 		i.Err = err
 		return
-	}
-}
-
-// closeChunkIndexChan 安全地关闭ChunkIndexChan，确保只关闭一次
-func (i *IndexStream) closeChunkIndexChan() {
-	// 如果已经关闭，直接返回
-	if i.ChunkIndexChanClosed.Load() {
-		return
-	}
-
-	// 尝试将标志设置为true，如果成功（之前是false）则关闭channel
-	if i.ChunkIndexChanClosed.CompareAndSwap(false, true) {
-		i.closeChunkIndexChan()
 	}
 }
