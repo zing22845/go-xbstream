@@ -138,22 +138,40 @@ func main() {
 
 	startTime := time.Now()
 
-	// 执行提取
-	bytesExtracted, err := index.ExtractFiles(
-		readerPool,
+	// 创建index stream
+	indexStream := index.NewIndexStream(
+		ctx,
+		*concurrencyPtr,
+		*idxFileNamePtr,
 		*targetDirPtr,
+		"",
+		false,
+		encryptKey,
+		0,
+		nil,
+		nil,
+		nil,
 	)
-	if err != nil {
+
+	// 执行提取
+	totalSize, err := indexStream.ExtractFiles(
+		readerPool,
+		*concurrencyPtr,
+		*targetDirPtr,
+		keys,
+		nil,
+	)
+	if indexStream.Err != nil {
 		log.Fatalf("提取文件失败: %v", err)
 	}
 
 	// 计算并打印统计信息
 	duration := time.Since(startTime)
-	bytesPerSecond := float64(bytesExtracted) / duration.Seconds()
+	bytesPerSecond := float64(totalSize.Load()) / duration.Seconds()
 
 	fmt.Printf("\n提取完成:\n")
 	fmt.Printf("- 耗时: %v\n", duration)
-	fmt.Printf("- 提取: %.2f MB\n", float64(bytesExtracted)/(1024*1024))
+	fmt.Printf("- 提取: %.2f MB\n", float64(totalSize.Load())/(1024*1024))
 	fmt.Printf("- 平均速度: %.2f MB/s\n", bytesPerSecond/(1024*1024))
 
 	// 列出提取的文件

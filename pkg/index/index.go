@@ -64,7 +64,6 @@ type IndexStream struct {
 	ChunkIndexChan                    chan *ChunkIndex
 	SchemaFileChan                    chan *TableSchema
 	TableSchemaChan                   chan *TableSchema
-	FileSchemaChan                    chan *FileSchema
 	IsParseTableSchema                bool
 	IsIndexDone                       bool
 	IndexFilePath                     string
@@ -117,7 +116,6 @@ func NewIndexStream(
 		IndexFilePath:        filepath.Join(baseDIR, indexFilename),
 		IndexFilename:        indexFilename,
 		ChunkIndexChan:       make(chan *ChunkIndex, concurrency),
-		FileSchemaChan:       make(chan *FileSchema, concurrency),
 		TableSchemaChan:      make(chan *TableSchema, concurrency),
 		SchemaFileChan:       make(chan *TableSchema, concurrency),
 		ExtractFilesDone:     make(chan struct{}, 1),
@@ -625,31 +623,96 @@ func (i *IndexStream) getChunkIndecis(likePaths, notLikePaths []string, onlyFirs
 	}
 }
 
-func (i *IndexStream) ExtractSingleFile(
-	rs io.ReadSeeker,
-	filepath string,
-	targetDIR string,
+func (i *IndexStream) ExtractFileByPayload(
+	ci *ChunkIndex,
+	r io.Reader,
+	payLen int64,
 ) (n int64, err error) {
-	likePaths := []string{filepath}
-	go i.getChunkIndecis(likePaths, nil, false)
-	for ci := range i.ChunkIndexChan {
-		ci.DecodeFilepath()
-		fileSchema, err := NewFileSchema(
+	var fileSchema *FileSchema
+	if ci.PayOffset == 0 {
+		fileSchema, err = NewFileSchema(
 			ci.Filepath,
-			0,
-			nil,
-			"",
-			"",
-			"",
-			"",
+			ci.ExtractLimitSize,
+			ci.EncryptKey,
+			ci.DecryptedFileType,
+			ci.DecryptMethod,
+			ci.DecompressedFileType,
+			ci.DecompressMethod,
 		)
 		if err != nil {
-			i.Err = err
-			return 0, err
+			n, _ = io.CopyN(io.Discard, r, payLen)
+			return n, err
 		}
-		i.FileSchemaChan <- fileSchema
+		defer fileSchema.StreamIn.Close()
+		return io.CopyN(fileSchema.StreamIn, r, payLen)
 	}
-	return
+	return io.CopyN(io.Discard, r, payLen)
+}
+
+func (i *IndexStream) ExtractSingleFile(
+	rs io.ReadSeeker,
+	ci *ChunkIndex,
+	targetDIR string,
+) (n int64, err error) {
+	// create target file
+	targetFile, err := os.Create(filepath.Join(targetDIR, ci.Filepath))
+	if err != nil {
+		return 0, err
+	}
+	defer targetFile.Close()
+
+	// create file schema
+	var fileSchema *FileSchema
+	fileSchema, err = NewFileSchema(
+		ci.Filepath,
+		ci.ExtractLimitSize,
+		ci.EncryptKey,
+		ci.DecryptedFileType,
+		ci.DecryptMethod,
+		ci.DecompressedFileType,
+		ci.DecompressMethod,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer fileSchema.StreamIn.Close()
+
+	// get chunk_indices
+	likePaths := []string{ci.Filepath}
+	go i.getChunkIndecis(likePaths, nil, false)
+	// read chunks and write to fileSchema's streamIn
+	go func(fileSchema *FileSchema) {
+		for subCi := range i.ChunkIndexChan {
+			subCi.EncryptKey = ci.EncryptKey
+			subCi.ExtractLimitSize = ci.ExtractLimitSize
+			subCi.DecodeFilepath()
+			_, err = rs.Seek(subCi.StartPosition, io.SeekStart)
+			if err != nil {
+				i.Err = err
+			}
+			xr := xbstream.NewReader(rs)
+			// decode chunk header
+			header, err := DecodeChunkHeader(xr)
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				i.Err = err
+				return
+			}
+			if subCi.PayOffset != header.PayOffset {
+				i.Err = fmt.Errorf("chunk pay offset not equal to chunk index pay offset")
+				return
+			}
+			payLen := int64(header.PayLen)
+			_, err = io.CopyN(fileSchema.StreamIn, xr, payLen)
+			if err != nil {
+				i.Err = err
+				return
+			}
+		}
+	}(fileSchema)
+	return fileSchema.ProcessToWriter(targetFile)
 }
 
 func (i *IndexStream) ExtractFiles(
@@ -657,7 +720,7 @@ func (i *IndexStream) ExtractFiles(
 	concurrency int,
 	targetDIR string,
 	likePaths, notLikePaths []string,
-) {
+) (totalSize atomic.Int64, err error) {
 	// extract index file
 	i.ExtractIndexFile(rsp, targetDIR)
 	if i.Err != nil {
@@ -675,10 +738,7 @@ func (i *IndexStream) ExtractFiles(
 
 	// extract files from index stream
 	var wg sync.WaitGroup
-	var totalSize atomic.Int64
 	for ci := range i.ChunkIndexChan {
-		ci.EncryptKey = i.EncryptKey
-		ci.ExtractLimitSize = i.ExtractLimitSize
 		wg.Add(1)
 		go func(ci *ChunkIndex) {
 			defer wg.Done()
@@ -688,6 +748,8 @@ func (i *IndexStream) ExtractFiles(
 				return
 			}
 			defer rsp.Put(rs)
+			ci.EncryptKey = i.EncryptKey
+			ci.ExtractLimitSize = i.ExtractLimitSize
 			ci.DecodeFilepath()
 			subStream := NewIndexStream(
 				i.CTX,
@@ -702,7 +764,7 @@ func (i *IndexStream) ExtractFiles(
 				nil, // No Meilisearch index
 				nil, // No Meilisearch default doc
 			)
-			n, err := subStream.ExtractSingleFile(rs, ci.Filepath, targetDIR)
+			n, err := subStream.ExtractSingleFile(rs, ci, targetDIR)
 			if err != nil {
 				i.Err = err
 			}
@@ -711,6 +773,7 @@ func (i *IndexStream) ExtractFiles(
 	}
 	wg.Wait()
 	<-i.ExtractFilesDone
+	return totalSize, i.Err
 }
 
 func (i *IndexStream) ExtractSchemas(

@@ -35,25 +35,11 @@ func ExtractSchemaByPayload(
 	return io.CopyN(io.Discard, r, payLen)
 }
 
-func DecodeChunkHeader(xr *xbstream.Reader) (header *xbstream.ChunkHeader, err error) {
-	// read header
-	header = &xbstream.ChunkHeader{}
-	err = xr.NextHeader(header)
-	if err != nil {
-		return nil, err
-	}
-	return header, nil
-}
-
 func ExtractSingleSchema(
 	ci *ChunkIndex,
 	schemaChan chan *TableSchema,
 	r io.ReadSeeker,
 ) (err error) {
-	/*
-		timer := utils.NewSimpleTimer()
-		timer.Start()
-	*/
 	// seek to chunk start position
 	_, err = r.Seek(ci.StartPosition, io.SeekStart)
 	if err != nil {

@@ -115,7 +115,6 @@ func (fs *FileSchema) decryptStream() (err error) {
 		defer func() {
 			if err != nil {
 				if errors.Is(err, xbcrypt.ErrExceedExtractSize) {
-					// copy the rest of the stream to discard
 					err = fmt.Errorf("partially decrypted to limit size  %d", fs.ExtractLimitSize)
 				} else {
 					err = fmt.Errorf("failed to process chunks: %w", err)
@@ -172,7 +171,8 @@ func (fs *FileSchema) decompressStream() (err error) {
 		}
 	case "":
 		// no decompress
-		return nil
+		_, err = io.Copy(fs.OutputWriter, fs.MidPipeOut)
+		return err
 	default:
 		return fmt.Errorf("unsupported decompress method %s", fs.DecompressMethod)
 	}
@@ -180,49 +180,47 @@ func (fs *FileSchema) decompressStream() (err error) {
 }
 
 // ProcessToWriter 处理文件并写入到指定的写入器
-func (fs *FileSchema) ProcessToWriter(writer io.Writer) (err error) {
+func (fs *FileSchema) ProcessToWriter(writer io.Writer) (n int64, err error) {
 	if writer == nil {
-		return fmt.Errorf("output writer is nil")
+		return 0, fmt.Errorf("output writer is nil")
 	}
 
 	fs.OutputWriter = writer
 
-	// 启动协程来处理流式数据
-	errChan := make(chan error, 2) // 一个用于解密错误，一个用于解压错误
-	done := make(chan struct{})
+	// 创建错误通道
+	errChan := make(chan error, 2)
+	doneChan := make(chan int64, 1)
 
+	// 启动解压缩协程
 	go func() {
-		defer close(done)
+		err := fs.decompressStream()
+		if err != nil {
+			fs.DecompressErr = err.Error()
+			errChan <- err
+			return
+		}
+		doneChan <- 0
+	}()
 
-		// decrypt stream
+	// 启动解密协程
+	go func() {
 		err := fs.decryptStream()
 		if err != nil {
 			fs.DecryptErr = err.Error()
 			errChan <- err
-			return
-		}
-
-		// if need decompress, process decompress
-		if fs.DecompressMethod == "qp" {
-			err = fs.decompressStream()
-			if err != nil {
-				fs.DecompressErr = err.Error()
-				errChan <- err
-				return
-			}
 		}
 	}()
 
 	// 等待处理完成或出错
 	select {
 	case err := <-errChan:
-		return err
-	case <-done:
-		return nil
+		return 0, err
+	case bytesWritten := <-doneChan:
+		return bytesWritten, nil
 	}
 }
 
-// CloseAllPipes 关闭所有打开的管道
+// CloseAllPipes close all opened pipes
 func (fs *FileSchema) CloseAllPipes() {
 	if fs.StreamIn != nil {
 		fs.StreamIn.Close()
