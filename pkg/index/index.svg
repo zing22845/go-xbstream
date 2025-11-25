@@ -22,7 +22,7 @@
 
   <!-- Timeline / Stream representation -->
   <line x1="80" y1="80" x2="80" y2="700" stroke="#888" stroke-width="2" stroke-dasharray="5,5" />
-  <text x="60" y="90" transform="rotate(-90 60,90)" class="subtitle">XBStream Byte Stream</text>
+  <text x="60" y="390" transform="rotate(-90 60,390)" text-anchor="middle" class="subtitle">XBStream Byte Stream</text>
 
   <!-- 1. Index File Start -->
   <text x="100" y="100" class="label">Start Position (Offset X)</text>
