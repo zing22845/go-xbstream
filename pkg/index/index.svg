@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800">
+  <style>
+    text { font-family: Arial, sans-serif; font-size: 14px; }
+    .title { font-size: 18px; font-weight: bold; }
+    .subtitle { font-size: 12px; font-style: italic; }
+    .label { font-weight: bold; }
+    rect { fill: #f0f0f0; stroke: #000; stroke-width: 1; }
+    .highlight { fill: #e6f3ff; }
+    .arrow { stroke: #d32f2f; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d32f2f" />
+    </marker>
+  </defs>
+
+  <!-- Main container -->
+  <rect x="20" y="20" width="560" height="760" fill="#fff" stroke="#000" stroke-width="2"/>
+
+  <!-- Title -->
+  <text x="300" y="50" text-anchor="middle" class="title">XBStream Index Storage Structure</text>
+
+  <!-- Timeline / Stream representation -->
+  <line x1="80" y1="80" x2="80" y2="700" stroke="#888" stroke-width="2" stroke-dasharray="5,5" />
+  <text x="60" y="90" transform="rotate(-90 60,90)" class="subtitle">XBStream Byte Stream</text>
+
+  <!-- 1. Index File Start -->
+  <text x="100" y="100" class="label">Start Position (Offset X)</text>
+  <line x1="80" y1="105" x2="500" y2="105" stroke="#d32f2f" stroke-width="2" stroke-dasharray="4 2"/>
+
+  <!-- Index File Chunks -->
+  <rect x="120" y="130" width="400" height="180" class="highlight"/>
+  <text x="320" y="150" text-anchor="middle" class="label">1. Index File (SQLite DB)</text>
+  
+  <!-- Inner Chunk representation -->
+  <rect x="140" y="170" width="360" height="40"/>
+  <text x="150" y="195">Chunk Header (Path: "backup.index")</text>
+  
+  <rect x="140" y="210" width="360" height="40"/>
+  <text x="150" y="235">Payload (SQLite DB content...)</text>
+  
+  <text x="320" y="270" text-anchor="middle" class="subtitle">... (Multiple chunks if large) ...</text>
+  
+  <rect x="140" y="280" width="360" height="20"/>
+  <text x="150" y="295" font-size="10">EOF Chunk</text>
+
+  <!-- 2. Offset File Chunk -->
+  <rect x="120" y="350" width="400" height="160" class="highlight"/>
+  <text x="320" y="370" text-anchor="middle" class="label">2. Offset File</text>
+
+  <rect x="140" y="390" width="360" height="40"/>
+  <text x="150" y="415">Chunk Header (Path: "backup.index.offset")</text>
+
+  <rect x="140" y="430" width="360" height="40" fill="#ffebee"/>
+  <text x="150" y="455">Payload (8 bytes: Offset X)</text>
+  
+  <rect x="140" y="470" width="360" height="20"/>
+  <text x="150" y="485" font-size="10">EOF Chunk</text>
+
+  <!-- Visual Connection -->
+  <path d="M 500 450 L 540 450 L 540 105 L 500 105" class="arrow" />
+  <text x="550" y="280" transform="rotate(90 550,280)" class="subtitle" fill="#d32f2f">Points to Start Position</text>
+
+  <!-- Explanation -->
+  <text x="120" y="550" class="label">Storage Logic:</text>
+  <text x="120" y="580">1. The Index File (SQLite DB) is written to the stream first.</text>
+  <text x="120" y="600">   - It is split into standard XBStream chunks.</text>
+  <text x="120" y="620">   - The byte offset of the first byte of the first chunk header is recorded.</text>
+  
+  <text x="120" y="660">2. The Offset File is written immediately after.</text>
+  <text x="120" y="680">   - Filename is appended with ".offset".</text>
+  <text x="120" y="700">   - Content is exactly 8 bytes (Little Endian uint64).</text>
+  <text x="120" y="720">   - Value is the recorded start offset of the Index File.</text>
+
+</svg>
